@@ -5,6 +5,8 @@
 from PySide6.QtCore import QThreadPool, QRunnable, QObject, Signal
 from typing import Callable, Any
 import traceback
+from .logger import write_error_log
+from ..config.settings import Settings
 
 class WorkerSignals(QObject):
     """线程信号，用于安全地将结果/错误传回主线程。"""
@@ -31,6 +33,7 @@ class Worker(QRunnable):
             self.signals.finished.emit(result)
         except Exception as e:
             tb = traceback.format_exc()
+            write_error_log("后台线程异常", tb)
             self.signals.error.emit(f"{str(e)}\n{tb}")
 
 class ThreadPoolManager:
@@ -45,8 +48,10 @@ class ThreadPoolManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._pool = QThreadPool.globalInstance()
-            # 将在 Settings 加载后由核心层设置
-            cls._instance._pool.setMaxThreadCount(6)
+            # 从配置文件加载并发限制 (git.max_concurrent)，避免硬编码
+            settings = Settings()
+            max_threads = settings.get("git.max_concurrent", 6)
+            cls._instance._pool.setMaxThreadCount(max_threads)
         return cls._instance
 
     def set_max_threads(self, count: int) -> None:

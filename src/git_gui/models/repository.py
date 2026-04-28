@@ -19,6 +19,8 @@ class GitRepository:
     last_fetched: Optional[datetime] = None
     is_dirty: bool = False
     status: str = "unknown"  # synced, behind, ahead, diverged
+    ahead_count: int = 0
+    behind_count: int = 0
 
     def __post_init__(self):
         if not self.name:
@@ -31,6 +33,9 @@ class GitRepository:
             "name": self.name,
             "current_branch": self.current_branch,
             "is_dirty": self.is_dirty,
+            "status": self.status,
+            "ahead_count": self.ahead_count,
+            "behind_count": self.behind_count,
         }
 
     @classmethod
@@ -41,4 +46,7 @@ class GitRepository:
             name=data.get("name", path.name),
             current_branch=data.get("current_branch", "HEAD"),
             is_dirty=data.get("is_dirty", False),
+            status=data.get("status", "unknown"),
+            ahead_count=data.get("ahead_count", 0),
+            behind_count=data.get("behind_count", 0),
         )

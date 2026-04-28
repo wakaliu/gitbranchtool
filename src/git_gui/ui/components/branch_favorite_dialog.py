@@ -19,9 +19,14 @@ class BranchFavoriteDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        self.setMinimumSize(320, 360)
 
-        QLabel("常用分支收藏 (双击选择):", self)
+        self.title_label = QLabel("常用分支收藏 (双击选择):", self)
+        layout.addWidget(self.title_label)
         self.list_widget = QListWidget()
+        self.list_widget.setMinimumHeight(200)
         self.list_widget.itemDoubleClicked.connect(self._select_branch)
         layout.addWidget(self.list_widget)
 

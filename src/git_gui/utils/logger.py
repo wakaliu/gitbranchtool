@@ -5,6 +5,34 @@
 from datetime import datetime
 import time
 from typing import Callable, Optional
+from pathlib import Path
+import traceback
+import os
+
+def _get_log_dir() -> Path:
+    custom_dir = os.environ.get("GITTOOL_LOG_DIR", "").strip()
+    if custom_dir:
+        return Path(custom_dir)
+    return Path("logs")
+
+def write_error_log(title: str, details: str) -> None:
+    """写入本地错误日志，便于排查闪退与异常。"""
+    try:
+        log_dir = _get_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "app-error.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 80 + "\n")
+            f.write(f"{datetime.now().isoformat()} | {title}\n")
+            f.write(details.rstrip() + "\n")
+    except Exception:
+        # 日志写入失败时不再抛出，避免影响主流程
+        pass
+
+def write_exception_log(title: str, exc_type, exc_value, exc_tb) -> None:
+    """写入异常堆栈到本地日志。"""
+    details = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    write_error_log(title, details)
 
 class OperationLogger:
     """操作日志记录器。
@@ -33,7 +61,10 @@ class OperationLogger:
         return elapsed
 
     def append(self, message: str) -> None:
-        """追加日志并触发 UI 更新。"""
+        """追加日志并触发 UI 更新。
+
+        只传递增量日志行 (而非全量join)，避免并行操作时重复发送大字符串导致UI卡顿或崩溃。
+        """
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_line = f"[{timestamp}] {message}"
         self._logs.append(log_line)
@@ -43,7 +74,7 @@ class OperationLogger:
             self._logs = self._logs[-self.max_lines:]
 
         if self.on_log_updated:
-            self.on_log_updated("\n".join(self._logs))
+            self.on_log_updated(log_line)
 
     def clear(self) -> None:
         """清空日志 (用户手动或新操作前)。"""

@@ -3,7 +3,7 @@
 包含目标分支输入、收藏、一键切线、Stash 选项、Git 控制台按钮和结果显示。
 """
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-                               QCheckBox, QLabel, QGroupBox, QMessageBox)
+                               QCheckBox, QLabel, QGroupBox, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal
 from pathlib import Path
 from ...config.settings import Settings
@@ -16,6 +16,7 @@ class OperationPanel(QWidget):
     switch_requested = Signal(str, bool)   # target_branch, stash
     console_requested = Signal()
     favorite_requested = Signal()
+    fill_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,17 +26,25 @@ class OperationPanel(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(6)
+
+        self.title_label = QLabel("操作台")
+        self.title_label.setStyleSheet("font-weight: 700; font-size: 13px; color: #333333;")
+        layout.addWidget(self.title_label)
 
         # 目标分支区域
         target_group = QGroupBox("目标分支")
         target_layout = QHBoxLayout(target_group)
+        target_layout.setContentsMargins(8, 18, 8, 8)
+        target_layout.setSpacing(6)
 
         self.branch_input = QLineEdit()
         self.branch_input.setPlaceholderText("输入或粘贴分支名 (留空则使用当前分支最新节点)")
         self.btn_fill = QPushButton("填入")
         self.btn_favorite = QPushButton("收藏")
 
-        self.btn_fill.clicked.connect(self._fill_from_repo)
+        self.btn_fill.clicked.connect(self.fill_requested.emit)
         self.btn_favorite.clicked.connect(self.favorite_requested.emit)
 
         target_layout.addWidget(self.branch_input, 4)
@@ -61,30 +70,92 @@ class OperationPanel(QWidget):
         options_layout.addWidget(self.chk_stash)
         options_layout.addWidget(self.btn_console)
         layout.addLayout(options_layout)
+        layout.addStretch()
 
         # 结果显示
         result_group = QGroupBox("Git 执行结果")
         result_layout = QVBoxLayout(result_group)
-        self.result_label = QLabel("等待操作...")
-        self.result_label.setWordWrap(True)
-        self.result_label.setStyleSheet("background-color: #f0f0f0; padding: 10px; border-radius: 4px;")
+        result_layout.setContentsMargins(8, 18, 8, 8)
+        result_layout.setSpacing(6)
+        result_tools_layout = QHBoxLayout()
+        result_tools_layout.addStretch()
+        self.btn_clear_result = QPushButton("清")
+        self.btn_clear_result.setFixedSize(20, 20)
+        self.btn_clear_result.setToolTip("清理执行结果")
+        self.btn_clear_result.clicked.connect(self.clear_result)
+        result_tools_layout.addWidget(self.btn_clear_result)
+        result_layout.addLayout(result_tools_layout)
+        self.result_label = QPlainTextEdit()
+        self.result_label.setReadOnly(True)
+        self.result_label.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.result_label.setPlaceholderText("等待操作...")
+        self.result_label.document().setMaximumBlockCount(200)
+        self.result_label.setFixedHeight(86)
+        self.result_label.setStyleSheet("background-color: #f0f0f0; padding: 6px; border-radius: 4px;")
         result_layout.addWidget(self.result_label)
+        layout.addSpacing(6)
         layout.addWidget(result_group)
-
-        layout.addStretch()
+        self.target_group = target_group
+        self.result_group = result_group
+        self.apply_language(self.settings.language)
 
     def _on_switch_clicked(self) -> None:
         target = self.branch_input.text().strip()
         stash = self.chk_stash.isChecked()
         self.switch_requested.emit(target, stash)
 
-    def _fill_from_repo(self) -> None:
-        """从当前选中仓库获取当前分支填入 (多选时取第一个)。"""
-        # 实际逻辑由 MainWindow 提供当前选中仓库
-        # 这里触发信号让主窗口处理
-        self.branch_input.setText(self.settings.get("paths.default_branch", "develop"))
+    def set_target_branch(self, branch: str) -> None:
+        """将目标分支输入框设置为指定分支。"""
+        self.branch_input.setText(branch)
+
+    def apply_language(self, language: str) -> None:
+        """应用操作台文案语言。"""
+        if language == "en":
+            self.title_label.setText("Actions")
+            self.target_group.setTitle("Target Branch")
+            self.branch_input.setPlaceholderText("Enter or paste branch name (empty means use latest commit of current branch)")
+            self.btn_fill.setText("Fill")
+            self.btn_favorite.setText("Favorite")
+            self.btn_switch.setText("Switch Branch")
+            self.chk_stash.setText("Stash local changes")
+            self.btn_console.setText("Open Git Console")
+            self.result_group.setTitle("Git Results")
+            self.btn_clear_result.setToolTip("Clear results")
+            return
+        self.title_label.setText("操作台")
+        self.target_group.setTitle("目标分支")
+        self.branch_input.setPlaceholderText("输入或粘贴分支名 (留空则使用当前分支最新节点)")
+        self.btn_fill.setText("填入")
+        self.btn_favorite.setText("收藏")
+        self.btn_switch.setText("一键切线 (Switch)")
+        self.chk_stash.setText("Stash 本地修改")
+        self.btn_console.setText("打开 Git 控制台")
+        self.result_group.setTitle("Git 执行结果")
+        self.btn_clear_result.setToolTip("清理执行结果")
 
     def update_result(self, text: str, is_success: bool = True) -> None:
         color = "#28a745" if is_success else "#dc3545"
-        self.result_label.setStyleSheet(f"background-color: #f0f0f0; padding: 10px; border-radius: 4px; color: {color};")
-        self.result_label.setText(text)
+        self.result_label.setStyleSheet(
+            f"background-color: #f0f0f0; padding: 6px; border-radius: 4px; color: {color};"
+        )
+        self.result_label.appendPlainText(text)
+        self.result_label.verticalScrollBar().setValue(self.result_label.verticalScrollBar().maximum())
+
+    def clear_result(self) -> None:
+        """清空执行结果，避免新旧批次日志混在一起。"""
+        self.result_label.clear()
+
+    def reset_switch_button(self) -> None:
+        """重置一键切线按钮状态。
+
+        在进度对话框收尾后主线程同步调用即可；不再使用 QTimer，避免与对话框
+        销毁顺序叠加产生额外事件导致不稳定。
+        """
+        try:
+            self.btn_switch.setEnabled(True)
+            self.btn_switch.setStyleSheet(
+                "font-size: 16px; padding: 12px; background-color: #0078d4; color: white; font-weight: bold;"
+            )
+        except Exception:
+            if hasattr(self, "btn_switch"):
+                self.btn_switch.setEnabled(True)

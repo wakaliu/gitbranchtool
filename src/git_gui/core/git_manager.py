@@ -7,10 +7,12 @@ import subprocess
 from pathlib import Path
 import time
 import psutil
+import platform
 from typing import List, Dict, Optional, Callable
 from ..models.repository import GitRepository
 from ..config.settings import Settings
 from ..utils.file_utils import get_current_branch
+from ..utils.logger import write_error_log
 
 class GitManager:
     """Git 操作核心。
@@ -21,9 +23,13 @@ class GitManager:
     def __init__(self):
         self.settings = Settings()
 
-    def _run_git(self, repo_path: Path, args: List[str], timeout: int = 30) -> str:
-        """执行 git 命令，返回输出。自动处理常见错误。"""
+    def _run_git(self, repo_path: Path, args: List[str], timeout: int = 45) -> str:
+        """执行 git 命令，返回输出。自动处理常见错误。
+
+        默认timeout提高到45s (switch/fetch可单独覆盖)，防止33%卡住。
+        """
         cmd = ["git"] + args
+        write_error_log("Git命令开始", f"repo={repo_path}\ncmd={' '.join(cmd)}\ntimeout={timeout}")
         try:
             result = subprocess.run(
                 cmd,
@@ -34,46 +40,76 @@ class GitManager:
                 check=False
             )
             if result.returncode != 0:
+                write_error_log("Git命令失败", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}\nstderr={result.stderr[:400]}")
                 # 常见锁错误处理
                 if "index.lock" in result.stderr or "Another git process" in result.stderr:
                     self._unlock_git(repo_path)
                     # 重试一次
                     result = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True, timeout=timeout)
+                    write_error_log("Git命令重试完成", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
+            write_error_log("Git命令结束", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
             return result.stdout.strip() or result.stderr.strip()
         except subprocess.TimeoutExpired:
+            write_error_log("Git命令超时", f"repo={repo_path}\ncmd={' '.join(cmd)}")
             return f"命令超时: {' '.join(args)}"
         except FileNotFoundError:
+            write_error_log("Git命令异常", f"repo={repo_path}\ncmd={' '.join(cmd)}\nGit 未安装或未加入 PATH")
             return "Git 未安装或未加入 PATH"
         except Exception as e:
+            write_error_log("Git命令异常", f"repo={repo_path}\ncmd={' '.join(cmd)}\nerror={e}")
             return f"执行失败: {str(e)}"
 
     def _unlock_git(self, repo_path: Path) -> bool:
-        """自动解锁 git 进程锁。
+        """自动解锁 git 进程锁（更激进版，解决并发闪退）。
 
-        Windows 使用 taskkill 终止 git.exe，macOS 使用 kill。
-        这能显著提高自动化成功率。
+        针对用户反馈的“旧git进程未杀干净”问题：
+        - Windows：直接 taskkill /F /IM git.exe 杀所有git进程（比psutil可靠，避免AccessDenied）
+        - 无论repo匹配，都清理当前repo的lock文件
+        - 每次switch前强制调用，防止并行操作时index.lock竞争
+        这极大提高成功率，尤其多仓库并行场景。
         """
         if not self.settings.get("git.auto_unlock", True):
             return False
 
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                if proc.info['name'] and 'git' in proc.info['name'].lower():
-                    try:
-                        cmdline = ' '.join(proc.info.get('cmdline', []) or [])
-                        if str(repo_path) in cmdline or '.git' in cmdline:
+            system = platform.system().lower()
+            killed = False
+
+            if system == "windows":
+                # Windows更可靠：强制杀所有git.exe（不依赖psutil权限）
+                try:
+                    subprocess.run(["taskkill", "/F", "/IM", "git.exe"], 
+                                 capture_output=True, text=True, timeout=5, check=False)
+                    killed = True
+                    time.sleep(0.8)  # 给系统时间释放锁
+                except Exception:
+                    pass
+            else:
+                # 非Windows仍用psutil
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    if proc.info.get('name') and 'git' in proc.info['name'].lower():
+                        try:
                             proc.kill()
+                            killed = True
                             time.sleep(0.5)
-                            return True
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-            # 尝试删除 lock 文件 (作为后备)
-            for lock_name in [".git/index.lock", ".git/HEAD.lock"]:
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                            continue
+
+            # 总是清理当前repo的lock文件（后备+主要方案）
+            for lock_name in [".git/index.lock", ".git/HEAD.lock", ".git/refs/heads.lock"]:
                 lock_file = repo_path / lock_name
                 if lock_file.exists():
-                    lock_file.unlink(missing_ok=True)
+                    try:
+                        lock_file.unlink(missing_ok=True)
+                        killed = True
+                    except Exception:
+                        pass
+
+            if killed:
+                write_error_log("Git解锁", f"已清理 {repo_path.name} 的git进程/锁文件")
             return True
-        except Exception:
+        except Exception as e:
+            write_error_log("解锁异常", f"repo={repo_path}, error={e}")
             return False
 
     def get_repository_status(self, repo_path: Path) -> GitRepository:
@@ -102,14 +138,16 @@ class GitManager:
     def switch(self, repo_path: Path, target_branch: str = "", stash: bool = False, callback: Optional[Callable[[str], None]] = None) -> str:
         """切换分支 (一键切线)。
 
-        逻辑：
-        1. 如果有本地修改且勾选 stash，则先 stash
-        2. fetch 最新节点
-        3. checkout -B <branch> origin/<branch> --force
-        使用 -B 和 --force 确保成功率高。
+        每次操作前强制_unlock_git，解决“旧git进程残留导致并发冲突/闪退”问题。
+        逻辑顺序：unlock -> (stash) -> fetch(-f) -> checkout -B --force。
+        使用 -B 和 --force 确保即使分支已存在也能成功。
         """
         if not target_branch:
             target_branch = get_current_branch(repo_path)
+
+        # 每次切线前强制解锁，防止并行或残留进程导致index.lock冲突（用户反馈核心原因）
+        self._unlock_git(repo_path)
+        write_error_log("切线开始", f"repo={repo_path}\ntarget_branch={target_branch}\nstash={stash}")
 
         if callback:
             callback(f"正在切换到 {target_branch} @ {repo_path.name}...")
@@ -121,16 +159,17 @@ class GitManager:
             stash_out = self._run_git(repo_path, ["stash", "push", "-m", "Auto-stash before switch"])
             outputs.append(f"Stash: {stash_out}")
 
-        # Fetch
-        fetch_out = self._run_git(repo_path, ["fetch", "origin", target_branch, "--no-tags", "-f"])
+        # Fetch (使用 -f 强制更新，timeout增加防卡住)
+        fetch_out = self._run_git(repo_path, ["fetch", "origin", target_branch, "--no-tags", "-f"], timeout=60)
         outputs.append(f"Fetch: {fetch_out}")
 
-        # 强制切换
+        # 强制切换分支 (timeout增加，防止长时间卡住)
         switch_args = ["checkout", "-B", target_branch, f"origin/{target_branch}", "--force"]
-        switch_out = self._run_git(repo_path, switch_args)
+        switch_out = self._run_git(repo_path, switch_args, timeout=45)
         outputs.append(f"Switch: {switch_out}")
 
         result = "\n".join(outputs)
+        write_error_log("切线结束", f"repo={repo_path}\nresult_preview={result[:400]}")
         if callback:
             callback(result[:200] + "..." if len(result) > 200 else result)
         return result

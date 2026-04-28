@@ -8,7 +8,7 @@ import yaml
 from typing import Any, Dict
 from .constants import (
     DEFAULT_LANGUAGE, DEFAULT_THEME, DEFAULT_MAX_CONCURRENT,
-    LOG_MAX_LINES, CONFIG_FILE, APP_NAME, APP_VERSION
+    LOG_MAX_LINES, CONFIG_FILE, APP_NAME, APP_VERSION, DEFAULT_PROJECTS_DIR
 )
 
 class Settings:
@@ -105,6 +105,56 @@ class Settings:
 
     def get_recent_projects(self) -> list[str]:
         return self.get("paths.recent_projects", [])
+
+    def save_last_added_dir(self, directory: str) -> None:
+        """记住用户上次添加工程的目录位置。"""
+        self.set("paths.last_added_dir", directory)
+
+    def save_last_selected_project(self, project_path: str) -> None:
+        """记住用户上次选中的工程路径。"""
+        self.set("paths.last_selected_project", project_path)
+
+    def get_last_selected_project(self) -> Path | None:
+        """返回上次选中的工程路径（不存在则返回 None）。"""
+        value = self.get("paths.last_selected_project")
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.exists() else None
+
+    def save_repo_order(self, project_path: str, repo_paths: list[str]) -> None:
+        """保存某工程下仓库自定义顺序。"""
+        orders = self.get("paths.repo_orders", {})
+        if not isinstance(orders, dict):
+            orders = {}
+        orders[project_path] = repo_paths
+        self.set("paths.repo_orders", orders)
+
+    def get_repo_order(self, project_path: str) -> list[str]:
+        """读取某工程下仓库自定义顺序。"""
+        orders = self.get("paths.repo_orders", {})
+        if not isinstance(orders, dict):
+            return []
+        value = orders.get(project_path, [])
+        return value if isinstance(value, list) else []
+
+    def get_last_added_dir(self) -> Path:
+        """返回上次添加工程的目录（不存在则逐级回退到上级，直到找到存在的目录）。"""
+        last = self.get("paths.last_added_dir")
+        if last:
+            p = Path(last)
+            while p.exists() is False and str(p) != str(p.parent):
+                p = p.parent
+            if p.exists():
+                return p
+        return self.get_default_projects_dir()
+
+    def get_default_projects_dir(self) -> Path:
+        """返回默认工程目录（用于添加工程对话框初始路径）。"""
+        default = self.get("paths.default_projects_dir")
+        if default:
+            return Path(default)
+        return DEFAULT_PROJECTS_DIR
 
     @property
     def language(self) -> str:
