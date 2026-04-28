@@ -41,3 +41,6 @@ env/
 build/
 dist/
 *.egg-info/
+
+# Local profile (generated/overridden per developer)
+sausage_projects.yaml
