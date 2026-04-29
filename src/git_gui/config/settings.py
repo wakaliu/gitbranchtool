@@ -4,12 +4,14 @@
 所有可变参数 (路径、主题、语言、收藏分支等) 必须通过此类访问。
 """
 from pathlib import Path
+import shutil
 import yaml
 from typing import Any, Dict
 from .constants import (
     DEFAULT_LANGUAGE, DEFAULT_THEME, DEFAULT_MAX_CONCURRENT,
-    LOG_MAX_LINES, CONFIG_FILE, APP_NAME, APP_VERSION, DEFAULT_PROJECTS_DIR
+    LOG_MAX_LINES, APP_NAME, APP_VERSION, DEFAULT_PROJECTS_DIR
 )
+from ..utils.runtime_paths import get_config_file_path, get_embedded_assets_dir
 
 class Settings:
     """单例配置管理器。
@@ -26,8 +28,19 @@ class Settings:
             cls._instance._load_config()
         return cls._instance
 
+    def _ensure_user_config_file(self) -> None:
+        """首次启动时从 bundle 复制默认 config，保证可写路径上存在 yaml。"""
+        path = get_config_file_path()
+        if path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        embedded = get_embedded_assets_dir() / "config.embedded.yaml"
+        if embedded.exists():
+            shutil.copy(embedded, path)
+
     def _load_config(self) -> None:
         """加载配置文件，合并默认值。"""
+        self._ensure_user_config_file()
         self._config = {
             "app": {
                 "name": APP_NAME,
@@ -53,7 +66,7 @@ class Settings:
             }
         }
 
-        config_path = Path(CONFIG_FILE)
+        config_path = get_config_file_path()
         if config_path.exists():
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
@@ -93,7 +106,7 @@ class Settings:
         config[keys[-1]] = value
 
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            with open(get_config_file_path(), "w", encoding="utf-8") as f:
                 yaml.dump(self._config, f, allow_unicode=True, sort_keys=False)
             return True
         except Exception:

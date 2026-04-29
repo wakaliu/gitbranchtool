@@ -19,13 +19,15 @@ if __package__ in (None, ""):
     from src.git_gui.config.settings import Settings
     from src.git_gui.ui.main_window import MainWindow
     from src.git_gui.utils.logger import write_exception_log, write_error_log
+    from src.git_gui.utils.runtime_paths import get_logs_dir, get_application_root_for_diagnostics
 else:
     from .config.settings import Settings
     from .ui.main_window import MainWindow
     from .utils.logger import write_exception_log, write_error_log
+    from .utils.runtime_paths import get_logs_dir, get_application_root_for_diagnostics
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_LOG_DIR = _PROJECT_ROOT / "logs"
+_LOG_DIR = get_logs_dir()
+_PROJECT_ROOT = get_application_root_for_diagnostics()
 # 进程存活期间必须保持打开：若在 with 块内 enable(f) 后关闭 f，faulthandler 会写到已关闭句柄，易随机闪退。
 _FAULT_LOG_FP = None
 
@@ -70,7 +72,10 @@ def main() -> None:
     os.environ["GITTOOL_LOG_DIR"] = str(_LOG_DIR)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     _reset_session_log_files(_LOG_DIR)
-    write_error_log("应用启动", f"cwd={Path.cwd()}\nproject_root={_PROJECT_ROOT}")
+    write_error_log(
+        "应用启动",
+        f"cwd={Path.cwd()}\napp_root={_PROJECT_ROOT}\nlog_dir={_LOG_DIR}",
+    )
     _install_global_exception_hooks()
     global _FAULT_LOG_FP
     try:

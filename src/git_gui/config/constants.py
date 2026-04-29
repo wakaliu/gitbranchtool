@@ -28,5 +28,5 @@ LOG_MAX_LINES: Final[int] = 500
 WINDOW_MIN_SIZE: Final[tuple[int, int]] = (1200, 800)
 
 # 路径
-CONFIG_FILE: Final[Path] = Path("config.yaml")
+# 运行时配置路径由 utils.runtime_paths.get_config_file_path() 提供（支持 PyInstaller 与开发目录）。
 DEFAULT_PROJECTS_DIR: Final[Path] = Path.home() / "Projects"

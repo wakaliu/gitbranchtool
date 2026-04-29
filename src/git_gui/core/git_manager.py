@@ -13,6 +13,7 @@ from ..models.repository import GitRepository
 from ..config.settings import Settings
 from ..utils.file_utils import get_current_branch
 from ..utils.logger import write_error_log
+from ..utils.subprocess_helpers import subprocess_hide_console_kwargs
 
 class GitManager:
     """Git 操作核心。
@@ -37,7 +38,8 @@ class GitManager:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                check=False
+                check=False,
+                **subprocess_hide_console_kwargs(),
             )
             if result.returncode != 0:
                 write_error_log("Git命令失败", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}\nstderr={result.stderr[:400]}")
@@ -45,7 +47,14 @@ class GitManager:
                 if "index.lock" in result.stderr or "Another git process" in result.stderr:
                     self._unlock_git(repo_path)
                     # 重试一次
-                    result = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True, timeout=timeout)
+                    result = subprocess.run(
+                        cmd,
+                        cwd=str(repo_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        **subprocess_hide_console_kwargs(),
+                    )
                     write_error_log("Git命令重试完成", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
             write_error_log("Git命令结束", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
             return result.stdout.strip() or result.stderr.strip()
@@ -78,8 +87,14 @@ class GitManager:
             if system == "windows":
                 # Windows更可靠：强制杀所有git.exe（不依赖psutil权限）
                 try:
-                    subprocess.run(["taskkill", "/F", "/IM", "git.exe"], 
-                                 capture_output=True, text=True, timeout=5, check=False)
+                    subprocess.run(
+                        ["taskkill", "/F", "/IM", "git.exe"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                        **subprocess_hide_console_kwargs(),
+                    )
                     killed = True
                     time.sleep(0.8)  # 给系统时间释放锁
                 except Exception:

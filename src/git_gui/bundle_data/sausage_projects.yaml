@@ -1,0 +1,2 @@
+# 内置模板：无内部仓库列表时克隆对话框仅显示自定义页签；可按需扩展 repositories。
+repositories: []

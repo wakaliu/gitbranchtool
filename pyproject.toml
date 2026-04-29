@@ -14,9 +14,12 @@ dependencies = [
 [project.scripts]
 git-gui-tool = "src.git_gui.main:main"
 
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+
 [tool.pyinstaller]
 name = "GitPullSwitchTool"
 onefile = true
 windowed = true
-icon = "assets/icon.ico"  # 可后续添加
-# macOS Universal2 支持通过 --target-arch universal2
+icon = "assets/icon.ico"
+# 正式构建请使用 packaging/pyinstaller/*.spec；macOS Universal2 需在双架构 Python 下设置 target_arch

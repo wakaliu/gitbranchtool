@@ -25,6 +25,9 @@ target
 .idea/
 *.iml
 
+# 应用本地日志（运行时生成）
+logs/
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -42,5 +45,8 @@ build/
 dist/
 *.egg-info/
 
-# Local profile (generated/overridden per developer)
-sausage_projects.yaml
+# PyInstaller 中间产物（spec 位于 packaging/，可提交）
+packaging/pyinstaller/work-*/
+
+# 仓库根目录本地克隆配置（开发者自用）；内置模板见 src/git_gui/bundle_data/
+/sausage_projects.yaml

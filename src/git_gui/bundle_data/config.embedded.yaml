@@ -1,0 +1,26 @@
+app:
+  name: Git 拉线切线工具
+  version: 1.0.0
+  language: zh
+  theme: light
+paths:
+  recent_projects: []
+  default_branch: develop
+git:
+  max_concurrent: 6
+  fetch_args:
+    - --no-tags
+    - -f
+  switch_force: true
+  auto_unlock: true
+ui:
+  log_max_lines: 500
+  show_progress: true
+favorites:
+  branches:
+    - develop
+    - main
+    - master
+github:
+  repo: your-username/git-gui-pull-switch-tool
+  issues_url: https://api.github.com/repos/your-username/git-gui-pull-switch-tool/issues

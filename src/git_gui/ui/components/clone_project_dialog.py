@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.settings import Settings
+from ...utils.runtime_paths import get_embedded_assets_dir, get_repository_root, is_pyinstaller_bundle
+from ...utils.subprocess_helpers import subprocess_hide_console_kwargs
 
 
 class CloneProjectDialog(QDialog):
@@ -51,7 +53,6 @@ class CloneProjectDialog(QDialog):
         self._is_running = False
         self._cancel_requested = False
         self._active_processes: list[subprocess.Popen] = []
-        self._project_root = Path(__file__).resolve().parents[4]
         self._internal_profile = self._load_internal_profile()
         self._default_target_dir = default_target_dir
         self._setup_ui()
@@ -192,10 +193,21 @@ class CloneProjectDialog(QDialog):
         else:
             self.config_tabs.setTabText(0, "Custom Project" if is_en else "自定义 / 其他项目")
 
+    def _resolve_internal_profile_path(self) -> Path | None:
+        """优先仓库根目录下的 sausage_projects.yaml，其次内置 bundle（冻结包内）。"""
+        candidates: list[Path] = []
+        if not is_pyinstaller_bundle():
+            candidates.append(get_repository_root() / "sausage_projects.yaml")
+        candidates.append(get_embedded_assets_dir() / "sausage_projects.yaml")
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
     def _load_internal_profile(self) -> dict[str, Any] | None:
         """加载内部项目配置文件；不存在时返回 None。"""
-        profile_path = self._project_root / "sausage_projects.yaml"
-        if not profile_path.exists():
+        profile_path = self._resolve_internal_profile_path()
+        if profile_path is None:
             return None
         try:
             with profile_path.open("r", encoding="utf-8") as f:
@@ -325,6 +337,7 @@ class CloneProjectDialog(QDialog):
                 text=True,
                 timeout=12,
                 check=False,
+                **subprocess_hide_console_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 return candidate
@@ -415,6 +428,7 @@ class CloneProjectDialog(QDialog):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **subprocess_hide_console_kwargs(),
         )
         self._active_processes.append(process)
         output_lines: list[str] = []
@@ -528,6 +542,7 @@ class CloneProjectDialog(QDialog):
                     capture_output=True,
                     text=True,
                     check=False,
+                    **subprocess_hide_console_kwargs(),
                 )
             else:
                 process.terminate()

@@ -8,6 +8,8 @@ import os
 import subprocess
 import time
 
+from .subprocess_helpers import subprocess_hide_console_kwargs
+
 def is_git_repository(path: Path) -> bool:
     """判断目录是否为有效 Git 仓库。
 
@@ -93,6 +95,7 @@ def get_sync_status(repo_path: Path) -> tuple[str, int, int]:
             text=True,
             timeout=8,
             check=False,
+            **subprocess_hide_console_kwargs(),
         )
         if result.returncode != 0:
             return ("unknown", 0, 0)
@@ -122,6 +125,7 @@ def get_last_commit_timestamp(repo_path: Path) -> Optional[float]:
             text=True,
             timeout=6,
             check=False,
+            **subprocess_hide_console_kwargs(),
         )
         if result.returncode != 0:
             return None
