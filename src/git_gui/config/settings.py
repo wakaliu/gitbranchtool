@@ -3,6 +3,8 @@
 统一加载 config.yaml，支持热重载、默认值合并和持久化。
 所有可变参数 (路径、主题、语言、收藏分支等) 必须通过此类访问。
 """
+from __future__ import annotations
+
 from pathlib import Path
 import shutil
 import yaml

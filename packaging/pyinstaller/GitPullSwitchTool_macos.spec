@@ -1,8 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """macOS .app 目录包（onedir + BUNDLE），便于封装 DMG 与系统集成。
 
-未在此 spec 中固定 universal2：在 Intel 与 Apple Silicon 上分别构建可在对应架构运行；
-若需 universal2，需在支持双架构的 Python 解释器上执行 PyInstaller 并设置 target_arch。
+本 spec 生成 universal2：同一个 .app 同时支持 arm64（M 芯片）与 x86_64（Intel）。
 """
 from pathlib import Path
 
@@ -40,7 +39,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=True,
-    target_arch=None,
+    target_arch="universal2",
     codesign_identity=None,
     entitlements_file=None,
     icon=icon_str,

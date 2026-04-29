@@ -2,6 +2,8 @@
 
 严格遵循 MVC：只转发信号给核心层，不包含业务逻辑。
 """
+from __future__ import annotations
+
 from PySide6.QtWidgets import (QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout, QMenuBar,
                                QMenu, QMessageBox, QFileDialog, QStatusBar, QLabel, QPushButton, QGroupBox)
 from PySide6.QtCore import Qt, Signal, QTimer
