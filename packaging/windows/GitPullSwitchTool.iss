@@ -1,7 +1,7 @@
 ; Inno Setup 安装包：将 PyInstaller 产出的 onefile exe 安装到 Program Files。
 ; 需要已安装 Inno Setup 6，或将 ISCC 加入 PATH；scripts/build_windows.ps1 会尝试常见安装路径。
 #define MyAppName "GitPullSwitchTool"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "SausageDev"
 #define MyAppExeName "GitPullSwitchTool.exe"
 

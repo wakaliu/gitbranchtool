@@ -1,6 +1,6 @@
 [project]
 name = "git-gui-pull-switch-tool"
-version = "1.0.2"
+version = "1.0.1"
 description = "Git 本地拉线切线 GUI 工具 - PySide6 实现"
 requires-python = ">=3.8"
 dependencies = [

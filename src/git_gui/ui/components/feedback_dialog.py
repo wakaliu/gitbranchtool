@@ -66,7 +66,7 @@ class FeedbackDialog(QDialog):
             return
 
         success = self.reporter.submit_feedback(
-            title="用户反馈 - v1.0.2",
+            title="用户反馈 - v1.0.1",
             body=text,
             image_paths=self.image_paths
         )
