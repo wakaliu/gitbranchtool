@@ -2,6 +2,8 @@
 
 支持多选、拖拽重新排序、添加/移除按钮。
 """
+from __future__ import annotations
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QPushButton, QHBoxLayout, QMessageBox, QFileDialog)
 from PySide6.QtCore import Qt, Signal
