@@ -24,6 +24,7 @@ class BranchFavoriteDialog(QDialog):
         self.setMinimumSize(320, 360)
 
         self.title_label = QLabel("常用分支收藏 (双击选择):", self)
+        self.title_label.setProperty("role", "section-title")
         layout.addWidget(self.title_label)
         self.list_widget = QListWidget()
         self.list_widget.setMinimumHeight(200)
@@ -35,6 +36,7 @@ class BranchFavoriteDialog(QDialog):
         self.new_branch_input = QLineEdit()
         self.new_branch_input.setPlaceholderText("输入新分支名")
         self.btn_add = QPushButton("添加")
+        self.btn_add.setProperty("role", "primary")
         self.btn_remove = QPushButton("删除选中")
         self.btn_close = QPushButton("关闭")
 

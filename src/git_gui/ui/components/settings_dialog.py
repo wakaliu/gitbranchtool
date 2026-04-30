@@ -23,6 +23,8 @@ class SettingsDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 语言
         lang_group = QGroupBox("语言 / Language")
@@ -47,6 +49,7 @@ class SettingsDialog(QDialog):
         # 按钮
         btn_layout = QHBoxLayout()
         self.btn_save = QPushButton("保存并应用")
+        self.btn_save.setProperty("role", "primary")
         self.btn_cancel = QPushButton("取消")
 
         self.btn_save.clicked.connect(self._save_and_apply)

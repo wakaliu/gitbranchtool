@@ -3,8 +3,7 @@
 封装 QTextEdit，提供自动滚动、颜色高亮和清理功能。
 """
 from PySide6.QtWidgets import QTextEdit
-from PySide6.QtGui import QTextCursor, QColor
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QTextCursor
 
 class LogTextEdit(QTextEdit):
     """运行日志显示控件。
@@ -17,15 +16,8 @@ class LogTextEdit(QTextEdit):
         self.setLineWrapMode(QTextEdit.WidgetWidth)
         self.document().setMaximumBlockCount(800)  # 防止内存无限增长
 
-        # 基础样式
-        self.setStyleSheet("""
-            QTextEdit {
-                background-color: #f8f9fa;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 13px;
-                border: 1px solid #e0e0e0;
-            }
-        """)
+        # 保留等宽字体便于定位日志细节，其余颜色由全局主题控制。
+        self.setStyleSheet("QTextEdit { font-family: 'Consolas', 'Courier New', monospace; }")
 
     def append_log(self, text: str) -> None:
         """追加日志，支持简单颜色区分 (success/green, error/red)。"""

@@ -4,11 +4,11 @@
 """
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QPushButton, QHBoxLayout, QMessageBox, QFileDialog)
-from PySide6.QtCore import Qt, Signal, QMimeData
-from PySide6.QtGui import QDrag
+from PySide6.QtCore import Qt, Signal
 from pathlib import Path
 from ...models.project import Project
 from ...config.settings import Settings
+from ..theme import get_icon
 
 class ProjectPanel(QWidget):
     """左侧工程管理面板。
@@ -28,42 +28,39 @@ class ProjectPanel(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         self.title_label = QLabel("工程列表")
-        self.title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.title_label.setProperty("role", "section-title")
         layout.addWidget(self.title_label)
+        self.selection_hint_label = QLabel("未选择工程")
+        self.selection_hint_label.setProperty("role", "secondary")
+        layout.addWidget(self.selection_hint_label)
 
         self.list_widget = QListWidget()
+        self.list_widget.setObjectName("projectList")
+        self.list_widget.setAlternatingRowColors(True)
+        self.list_widget.setSpacing(4)
         self.list_widget.setDragEnabled(True)
         self.list_widget.setAcceptDrops(True)
         self.list_widget.setDragDropMode(QListWidget.InternalMove)
         self.list_widget.setSelectionMode(QListWidget.SingleSelection)
         self.list_widget.itemSelectionChanged.connect(self._on_selection_changed)
-        
-        # 选中高亮样式（跨平台兼容）
-        self.list_widget.setStyleSheet("""
-            QListWidget::item:selected {
-                background-color: #0078d4;
-                color: white;
-                font-weight: bold;
-            }
-            QListWidget::item:selected:!active {
-                background-color: #0078d4;
-                color: white;
-                font-weight: bold;
-            }
-            QListWidget::item {
-                padding: 6px;
-                border-radius: 4px;
-            }
-        """)
         layout.addWidget(self.list_widget)
+        self.empty_hint_label = QLabel("暂无工程，请先点击“添加工程”或“克隆新工程”。")
+        self.empty_hint_label.setProperty("role", "secondary")
+        self.empty_hint_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_hint_label)
 
         # 按钮栏
         btn_layout = QHBoxLayout()
         self.btn_add = QPushButton("添加工程")
         self.btn_remove = QPushButton("移除选中")
         self.btn_clone = QPushButton("克隆工程")
+        self.btn_add.setIcon(get_icon(self, "add"))
+        self.btn_remove.setIcon(get_icon(self, "remove"))
+        self.btn_clone.setIcon(get_icon(self, "clone"))
 
         self.btn_add.clicked.connect(self._add_project)
         self.btn_remove.clicked.connect(self._remove_selected)
@@ -82,14 +79,19 @@ class ProjectPanel(QWidget):
             self.btn_add.setText("Add Project")
             self.btn_remove.setText("Remove Project")
             self.btn_clone.setText("Clone New Project")
+            self.empty_hint_label.setText("No projects yet. Add or clone a project to get started.")
+            self.selection_hint_label.setText("No project selected")
             return
         self.title_label.setText("工程列表")
         self.btn_add.setText("添加工程")
         self.btn_remove.setText("移除工程")
         self.btn_clone.setText("克隆新工程")
+        self.empty_hint_label.setText("暂无工程，请先点击“添加工程”或“克隆新工程”。")
+        self.selection_hint_label.setText("未选择工程")
 
     def _on_selection_changed(self) -> None:
         selected = [item.data(Qt.UserRole) for item in self.list_widget.selectedItems() if item.data(Qt.UserRole)]
+        self._update_selected_project_hint(selected[0] if selected else None)
         self.project_selected.emit(selected)
 
     def load_projects(self, projects: list[Project]) -> None:
@@ -98,7 +100,12 @@ class ProjectPanel(QWidget):
         for project in projects:
             item = QListWidgetItem(project.name)
             item.setData(Qt.UserRole, str(project.path))
+            item.setToolTip(str(project.path))
             self.list_widget.addItem(item)
+        has_data = bool(projects)
+        self.empty_hint_label.setVisible(not has_data)
+        if not has_data:
+            self._update_selected_project_hint(None)
 
     def select_project_by_path(self, project_path: Path) -> bool:
         """按路径选中工程；找到返回 True。"""
@@ -120,6 +127,28 @@ class ProjectPanel(QWidget):
             if first_item:
                 first_item.setSelected(True)
                 self.list_widget.setCurrentItem(first_item)
+
+    def _update_selected_project_hint(self, selected_path: str | None) -> None:
+        """显示当前选中工程与仓库数，帮助用户快速确认操作上下文。"""
+        if not selected_path:
+            if self.settings.language == "en":
+                self.selection_hint_label.setText("No project selected")
+            else:
+                self.selection_hint_label.setText("未选择工程")
+            return
+        for project in self.projects:
+            if str(project.path) != selected_path:
+                continue
+            repo_count = len(project.repositories)
+            if self.settings.language == "en":
+                self.selection_hint_label.setText(f"Selected: {project.name} | {repo_count} repos")
+            else:
+                self.selection_hint_label.setText(f"当前选中：{project.name}（{repo_count} 个仓库）")
+            return
+        if self.settings.language == "en":
+            self.selection_hint_label.setText("Selected project is unavailable")
+        else:
+            self.selection_hint_label.setText("当前选中工程不可用")
 
     def _add_project(self) -> None:
         """打开文件对话框选择目录作为新工程（非阻塞）。记住上次选择的目录。"""

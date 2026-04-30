@@ -20,8 +20,12 @@ class GitConsoleDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        QLabel(f"当前仓库: {self.repo_path.name}", self).setStyleSheet("font-weight: bold;")
+        self.repo_title_label = QLabel(f"当前仓库: {self.repo_path.name}", self)
+        self.repo_title_label.setProperty("role", "section-title")
+        layout.addWidget(self.repo_title_label)
 
         self.output = QTextEdit()
         self.output.setReadOnly(True)
@@ -31,6 +35,7 @@ class GitConsoleDialog(QDialog):
         self.cmd_input = QLineEdit()
         self.cmd_input.setPlaceholderText("输入 git 命令 (例如: status, log --oneline -10)")
         self.btn_run = QPushButton("执行")
+        self.btn_run.setProperty("role", "primary")
         self.btn_clear = QPushButton("清空")
         self.btn_close = QPushButton("关闭")
 

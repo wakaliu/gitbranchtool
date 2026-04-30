@@ -63,8 +63,8 @@ class CloneProjectDialog(QDialog):
         self.setMinimumSize(860, 760)
         self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(8, 8, 8, 8)
-        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(12, 12, 12, 12)
+        root_layout.setSpacing(10)
 
         basic_group = QGroupBox()
         basic_layout = QGridLayout(basic_group)
@@ -86,7 +86,7 @@ class CloneProjectDialog(QDialog):
         self.branch_input.setPlaceholderText("develop")
 
         self.path_hint_label = QLabel()
-        self.path_hint_label.setStyleSheet("color: #7a7a7a;")
+        self.path_hint_label.setProperty("role", "secondary")
         self.path_hint_label.setWordWrap(True)
 
         basic_layout.addWidget(self.target_dir_label, 0, 0)
@@ -106,7 +106,7 @@ class CloneProjectDialog(QDialog):
         self.internal_tab = QWidget()
         internal_layout = QVBoxLayout(self.internal_tab)
         self.internal_list_hint = QLabel()
-        self.internal_list_hint.setStyleSheet("color: #3a7a3a;")
+        self.internal_list_hint.setProperty("role", "secondary")
         self.internal_repo_list = QListWidget()
         self.internal_repo_list.setSelectionMode(QListWidget.NoSelection)
         internal_layout.addWidget(self.internal_list_hint)
@@ -121,6 +121,8 @@ class CloneProjectDialog(QDialog):
         custom_btn_layout = QHBoxLayout()
         self.add_row_btn = QPushButton("+")
         self.remove_row_btn = QPushButton("-")
+        self.add_row_btn.setProperty("role", "compact")
+        self.remove_row_btn.setProperty("role", "compact")
         self.add_row_btn.clicked.connect(self._add_custom_row)
         self.remove_row_btn.clicked.connect(self._remove_custom_row)
         custom_btn_layout.addStretch()
@@ -135,6 +137,7 @@ class CloneProjectDialog(QDialog):
 
         start_row = QHBoxLayout()
         self.start_btn = QPushButton()
+        self.start_btn.setProperty("role", "primary")
         self.start_btn.setMinimumHeight(46)
         self.start_btn.clicked.connect(self._start_clone)
         self.shallow_clone_chk = QCheckBox()

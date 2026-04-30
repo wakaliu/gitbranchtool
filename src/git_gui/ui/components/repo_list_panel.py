@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal, QUrl, QMimeData
 from PySide6.QtGui import QDesktopServices, QDrag
 from pathlib import Path
 from ...models.repository import GitRepository
+from ..theme import get_icon
 
 class ReorderableRepoTable(QTableWidget):
     """支持拖拽重排的仓库表格（第1行固定不可移动）。"""
@@ -97,21 +98,28 @@ class RepoListPanel(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         # 标题（需在最上方，和其他区域表头统一）
         self.title_label = QLabel("仓库列表")
-        self.title_label.setStyleSheet("font-weight: 700; font-size: 13px; color: #333333;")
+        self.title_label.setProperty("role", "section-title")
         layout.addWidget(self.title_label)
 
         # 菜单栏 (对应图片中的全选/刷新/Fetch/新建拉线/一键瘦身)
         menu_frame = QFrame()
         menu_frame.setFrameShape(QFrame.StyledPanel)
         menu_layout = QHBoxLayout(menu_frame)
+        menu_layout.setContentsMargins(6, 6, 6, 6)
+        menu_layout.setSpacing(8)
 
         self.btn_select_all = QPushButton("全选/反选")
         self.btn_refresh = QPushButton("刷新")
         self.btn_fetch = QPushButton("Fetch")
         self.btn_slim = QPushButton("一键瘦身")
+        self.btn_refresh.setIcon(get_icon(self, "refresh"))
+        self.btn_fetch.setIcon(get_icon(self, "fetch"))
+        self.btn_slim.setIcon(get_icon(self, "cleanup"))
 
         for btn in (self.btn_select_all, self.btn_refresh, self.btn_fetch, self.btn_slim):
             menu_layout.addWidget(btn)
@@ -126,6 +134,8 @@ class RepoListPanel(QWidget):
         self.repo_table = ReorderableRepoTable()
         self.repo_table.setColumnCount(5)
         self.repo_table.setHorizontalHeaderLabels(["状态", "当前分支", "同步", "仓库名", "路径"])
+        self.repo_table.setAlternatingRowColors(True)
+        self.repo_table.verticalHeader().setDefaultSectionSize(34)
         self.repo_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.repo_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.repo_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -138,11 +148,15 @@ class RepoListPanel(QWidget):
         self.repo_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)
         self.repo_table.setColumnWidth(0, 56)
         self.repo_table.setColumnWidth(1, 230)
-        self.repo_table.setColumnWidth(2, 100)
+        self.repo_table.setColumnWidth(2, 120)
         self.repo_table.setColumnWidth(3, 160)
         self.repo_table.setColumnWidth(4, 520)
         self.repo_table.reorder_requested.connect(self._on_reorder_requested)
         layout.addWidget(self.repo_table)
+        self.empty_hint_label = QLabel("当前工程暂无仓库，请先刷新或重新添加工程。")
+        self.empty_hint_label.setProperty("role", "secondary")
+        self.empty_hint_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_hint_label)
         self.apply_language("zh")
 
     def load_repositories(self, repos: list[GitRepository]) -> None:
@@ -152,7 +166,6 @@ class RepoListPanel(QWidget):
         self.repositories = repos
         self.repo_table.setRowCount(len(repos))
         for row, repo in enumerate(repos):
-            sync_text = self._sync_text(repo.status, repo.ahead_count, repo.behind_count)
             status_item = QTableWidgetItem("")
             status_item.setFlags(
                 Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
@@ -162,15 +175,22 @@ class RepoListPanel(QWidget):
             cells = [
                 status_item,
                 QTableWidgetItem(repo.current_branch or "HEAD"),
-                QTableWidgetItem(sync_text),
+                QTableWidgetItem(""),
                 QTableWidgetItem(repo.name),
                 QTableWidgetItem(""),
             ]
             for col, cell in enumerate(cells):
-                if col in (0, 1, 2, 3):
+                if col in (0, 1, 3):
                     cell.setTextAlignment(Qt.AlignCenter)
                 self.repo_table.setItem(row, col, cell)
+            self.repo_table.setCellWidget(
+                row,
+                2,
+                self._create_sync_cell(repo.status, repo.ahead_count, repo.behind_count),
+            )
             self.repo_table.setCellWidget(row, 4, self._create_path_cell(repo.path))
+        has_data = bool(repos)
+        self.empty_hint_label.setVisible(not has_data)
 
     def apply_language(self, language: str) -> None:
         """应用仓库列表面板文案语言。"""
@@ -180,6 +200,7 @@ class RepoListPanel(QWidget):
             self.btn_refresh.setText("Refresh")
             self.btn_fetch.setText("Fetch")
             self.btn_slim.setText("Cleanup")
+            self.empty_hint_label.setText("No repositories in current project. Refresh or re-add the project.")
             self.repo_table.setHorizontalHeaderLabels(["State", "Branch", "Sync", "Repo", "Path"])
             return
         self.title_label.setText("仓库列表")
@@ -187,6 +208,7 @@ class RepoListPanel(QWidget):
         self.btn_refresh.setText("刷新")
         self.btn_fetch.setText("Fetch")
         self.btn_slim.setText("一键瘦身")
+        self.empty_hint_label.setText("当前工程暂无仓库，请先刷新或重新添加工程。")
         self.repo_table.setHorizontalHeaderLabels(["状态", "当前分支", "同步", "仓库名", "路径"])
 
     def _on_fetch_clicked(self) -> None:
@@ -238,15 +260,36 @@ class RepoListPanel(QWidget):
             return f"↕ {ahead_count}/{behind_count}"
         return "未知"
 
+    def _create_sync_cell(self, status: str, ahead_count: int, behind_count: int) -> QWidget:
+        """渲染同步状态标签，使关键信息在表格中可一眼识别。"""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignCenter)
+        pill = QLabel(self._sync_text(status, ahead_count, behind_count))
+        pill.setProperty("role", "sync-pill")
+        state_map = {
+            "synced": "synced",
+            "behind": "behind",
+            "ahead": "ahead",
+            "diverged": "diverged",
+        }
+        pill.setProperty("syncState", state_map.get(status, "unknown"))
+        layout.addWidget(pill)
+        return container
+
     def _create_path_cell(self, repo_path: Path) -> QWidget:
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(6)
 
-        open_btn = QPushButton("开")
+        open_btn = QPushButton("打开")
+        open_btn.setProperty("role", "compact")
+        open_btn.setIcon(get_icon(self, "open"))
         open_btn.setToolTip("打开目录")
-        open_btn.setFixedWidth(24)
+        open_btn.setFixedWidth(44)
         open_btn.clicked.connect(lambda _, p=repo_path: self._open_directory(p))
 
         path_label = QLabel(str(repo_path))

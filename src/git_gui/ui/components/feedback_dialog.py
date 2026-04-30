@@ -20,8 +20,12 @@ class FeedbackDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        QLabel("请描述您遇到的问题或改进建议 (可附截图):", self).setStyleSheet("font-weight: bold;")
+        title = QLabel("请描述您遇到的问题或改进建议 (可附截图):", self)
+        title.setProperty("role", "section-title")
+        layout.addWidget(title)
         self.text_edit = QTextEdit()
         self.text_edit.setPlaceholderText("例如：切换分支时提示 lock 文件存在...")
         layout.addWidget(self.text_edit)
@@ -34,6 +38,7 @@ class FeedbackDialog(QDialog):
         btn_layout = QHBoxLayout()
         self.btn_add_image = QPushButton("添加图片")
         self.btn_submit = QPushButton("提交到 GitHub Issues")
+        self.btn_submit.setProperty("role", "primary")
         self.btn_cancel = QPushButton("取消")
 
         self.btn_add_image.clicked.connect(self._add_image)

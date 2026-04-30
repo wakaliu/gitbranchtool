@@ -29,6 +29,7 @@ from .components.git_console_dialog import GitConsoleDialog
 from .components.clone_project_dialog import CloneProjectDialog
 from .widgets.log_text_edit import LogTextEdit
 from .widgets.progress_dialog import OperationProgressDialog
+from .theme import build_app_stylesheet
 
 class MainWindow(QMainWindow):
     """主应用窗口。
@@ -84,45 +85,25 @@ class MainWindow(QMainWindow):
         # 中央部件
         central = QWidget()
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
         # 整体三段布局：工程区(上) / 仓库+控制台(中) / 日志区(下)
         main_splitter = QSplitter(Qt.Vertical)
-        section_style = """
-            QGroupBox {
-                font-weight: 700;
-                font-size: 13px;
-                color: #333333;
-                border: 1px solid #9e9e9e;
-                border-radius: 3px;
-                margin-top: 0px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0;
-                width: 0px;
-                height: 0px;
-            }
-        """
-
         # 上：工程区域
         project_group = QGroupBox("")
-        project_group.setStyleSheet(section_style)
         project_layout = QVBoxLayout(project_group)
-        project_layout.setContentsMargins(6, 4, 6, 6)
+        project_layout.setContentsMargins(10, 8, 10, 10)
         self.project_panel = ProjectPanel()
         project_layout.addWidget(self.project_panel)
         main_splitter.addWidget(project_group)
 
         # 中：仓库列表(左) + 控制台(右)
         middle_group = QGroupBox("")
-        middle_group.setStyleSheet(section_style)
         middle_widget = QWidget()
         middle_layout = QHBoxLayout(middle_widget)
         middle_layout.setContentsMargins(0, 0, 0, 0)
-        middle_layout.setSpacing(8)
+        middle_layout.setSpacing(10)
 
         self.repo_panel = RepoListPanel()
         self.operation_panel = OperationPanel()
@@ -133,29 +114,32 @@ class MainWindow(QMainWindow):
         middle_splitter.setSizes([900, 500])
         middle_layout.addWidget(middle_splitter)
         middle_group_layout = QVBoxLayout(middle_group)
-        middle_group_layout.setContentsMargins(6, 4, 6, 6)
+        middle_group_layout.setContentsMargins(10, 8, 10, 10)
         middle_group_layout.addWidget(middle_widget)
         main_splitter.addWidget(middle_group)
 
         # 底部日志
         log_wrapper_group = QGroupBox("")
-        log_wrapper_group.setStyleSheet(section_style)
         log_wrapper_layout = QVBoxLayout(log_wrapper_group)
-        log_wrapper_layout.setContentsMargins(6, 4, 6, 6)
+        log_wrapper_layout.setContentsMargins(10, 8, 10, 10)
         log_group = QWidget()
         log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(8)
         self.log_title_label = QLabel("运行日志 (自动清理，显示耗时)")
+        self.log_title_label.setProperty("role", "section-title")
         log_layout.addWidget(self.log_title_label)
         self.log_text = LogTextEdit()
         log_layout.addWidget(self.log_text)
 
         self.clear_log_btn = QPushButton("清理日志")
+        self.clear_log_btn.setProperty("role", "compact")
         self.clear_log_btn.clicked.connect(self.logger.clear)
         log_layout.addWidget(self.clear_log_btn)
 
         log_wrapper_layout.addWidget(log_group)
         main_splitter.addWidget(log_wrapper_group)
-        main_splitter.setSizes([220, 420, 240])
+        main_splitter.setSizes([220, 440, 240])
         main_layout.addWidget(main_splitter)
 
         self.setCentralWidget(central)
@@ -207,6 +191,7 @@ class MainWindow(QMainWindow):
             if str(p.path) in selected_paths:
                 self.repo_panel.load_repositories(p.repositories)
                 break
+        self._update_workspace_header()
 
     def _on_repo_order_changed(self, ordered_repo_paths: List[str]) -> None:
         """仓库拖拽重排后，持久化顺序。"""
@@ -277,6 +262,7 @@ class MainWindow(QMainWindow):
             self.repo_panel.load_repositories(project.repositories)
         self._inactive_project_paths.discard(self.current_project_path)
         self.logger.end_operation(True, f"刷新完成：{refreshed} 个仓库")
+        self._update_workspace_header()
 
     def _perform_fetch(self, repo_paths: List[Path]) -> None:
         self._run_parallel_git_operation(
@@ -731,32 +717,7 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         """应用浅色/深色主题，确保重启后立即读取到用户设置。"""
-        theme = self.settings.theme
-        if theme == "dark":
-            self.setStyleSheet("""
-                QWidget { background-color: #1e1e1e; color: #e6e6e6; }
-                QGroupBox { border: 1px solid #555555; color: #e6e6e6; }
-                QLabel, QCheckBox, QMenuBar, QMenu, QStatusBar { color: #e6e6e6; }
-                QPushButton {
-                    background-color: #2d2d30;
-                    color: #e6e6e6;
-                    border: 1px solid #555555;
-                    padding: 4px 8px;
-                }
-                QPushButton:hover { background-color: #3a3a3d; }
-                QLineEdit, QPlainTextEdit, QListWidget, QTableWidget, QComboBox {
-                    background-color: #252526;
-                    color: #e6e6e6;
-                    border: 1px solid #555555;
-                }
-                QHeaderView::section {
-                    background-color: #2d2d30;
-                    color: #e6e6e6;
-                    border: 1px solid #555555;
-                }
-            """)
-            return
-        self.setStyleSheet("")
+        self.setStyleSheet(build_app_stylesheet(self.settings.theme))
 
     def _apply_language(self) -> None:
         """应用主界面与子面板语言。"""
@@ -788,9 +749,31 @@ class MainWindow(QMainWindow):
         self.project_panel.apply_language(language)
         self.repo_panel.apply_language(language)
         self.operation_panel.apply_language(language)
+        self._update_workspace_header()
 
     def _show_about(self) -> None:
         QMessageBox.about(self, "关于", "Git 拉线切线工具 v1.0\n\n专为多仓库项目设计的批量切分支工具。\n支持 Windows / macOS (Intel & M 芯片)。")
+
+    def _update_workspace_header(self) -> None:
+        """更新顶部工程摘要，帮助非开发用户快速理解当前上下文。"""
+        if not self.current_project_path:
+            if self.settings.language == "en":
+                self.statusBar().showMessage("Ready")
+            else:
+                self.statusBar().showMessage("就绪")
+            return
+        project = self.project_manager.get_project_by_path(self.current_project_path)
+        if not project:
+            if self.settings.language == "en":
+                self.statusBar().showMessage(f"Current project: {self.current_project_path.name}")
+            else:
+                self.statusBar().showMessage(f"当前工程：{self.current_project_path.name}")
+            return
+        repo_count = len(project.repositories)
+        if self.settings.language == "en":
+            self.statusBar().showMessage(f"Current project: {project.name} | Repositories: {repo_count}")
+            return
+        self.statusBar().showMessage(f"当前工程：{project.name}  |  仓库数：{repo_count}")
 
     def _on_log_updated(self, text: str) -> None:
         """处理日志更新信号。

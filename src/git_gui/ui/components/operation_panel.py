@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPu
 from PySide6.QtCore import Qt, Signal
 from pathlib import Path
 from ...config.settings import Settings
+from ..theme import get_icon
 
 class OperationPanel(QWidget):
     """操作台 (右侧)。
@@ -26,11 +27,11 @@ class OperationPanel(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         self.title_label = QLabel("操作台")
-        self.title_label.setStyleSheet("font-weight: 700; font-size: 13px; color: #333333;")
+        self.title_label.setProperty("role", "section-title")
         layout.addWidget(self.title_label)
 
         # 目标分支区域
@@ -43,6 +44,8 @@ class OperationPanel(QWidget):
         self.branch_input.setPlaceholderText("输入或粘贴分支名 (留空则使用当前分支最新节点)")
         self.btn_fill = QPushButton("填入")
         self.btn_favorite = QPushButton("收藏")
+        self.btn_fill.setIcon(get_icon(self, "fill"))
+        self.btn_favorite.setIcon(get_icon(self, "favorite"))
 
         self.btn_fill.clicked.connect(self.fill_requested.emit)
         self.btn_favorite.clicked.connect(self.favorite_requested.emit)
@@ -54,7 +57,8 @@ class OperationPanel(QWidget):
 
         # 一键切线
         self.btn_switch = QPushButton("一键切线 (Switch)")
-        self.btn_switch.setStyleSheet("font-size: 16px; padding: 12px; background-color: #0078d4; color: white; font-weight: bold;")
+        self.btn_switch.setProperty("role", "primary")
+        self.btn_switch.setIcon(get_icon(self, "switch"))
         self.btn_switch.clicked.connect(self._on_switch_clicked)
         layout.addWidget(self.btn_switch)
 
@@ -65,6 +69,7 @@ class OperationPanel(QWidget):
         self.chk_stash.setChecked(False)  # 默认不勾选
 
         self.btn_console = QPushButton("打开 Git 控制台")
+        self.btn_console.setIcon(get_icon(self, "console"))
         self.btn_console.clicked.connect(self.console_requested.emit)
 
         options_layout.addWidget(self.chk_stash)
@@ -78,9 +83,14 @@ class OperationPanel(QWidget):
         result_layout.setContentsMargins(8, 18, 8, 8)
         result_layout.setSpacing(6)
         result_tools_layout = QHBoxLayout()
+        self.result_summary_label = QLabel("等待操作")
+        self.result_summary_label.setProperty("role", "secondary")
+        result_tools_layout.addWidget(self.result_summary_label, 1)
         result_tools_layout.addStretch()
         self.btn_clear_result = QPushButton("清")
-        self.btn_clear_result.setFixedSize(20, 20)
+        self.btn_clear_result.setProperty("role", "compact")
+        self.btn_clear_result.setIcon(get_icon(self, "clear"))
+        self.btn_clear_result.setFixedHeight(24)
         self.btn_clear_result.setToolTip("清理执行结果")
         self.btn_clear_result.clicked.connect(self.clear_result)
         result_tools_layout.addWidget(self.btn_clear_result)
@@ -91,7 +101,6 @@ class OperationPanel(QWidget):
         self.result_label.setPlaceholderText("等待操作...")
         self.result_label.document().setMaximumBlockCount(200)
         self.result_label.setFixedHeight(86)
-        self.result_label.setStyleSheet("background-color: #f0f0f0; padding: 6px; border-radius: 4px;")
         result_layout.addWidget(self.result_label)
         layout.addSpacing(6)
         layout.addWidget(result_group)
@@ -120,6 +129,7 @@ class OperationPanel(QWidget):
             self.chk_stash.setText("Stash local changes")
             self.btn_console.setText("Open Git Console")
             self.result_group.setTitle("Git Results")
+            self.btn_clear_result.setText("Clear")
             self.btn_clear_result.setToolTip("Clear results")
             return
         self.title_label.setText("操作台")
@@ -131,18 +141,30 @@ class OperationPanel(QWidget):
         self.chk_stash.setText("Stash 本地修改")
         self.btn_console.setText("打开 Git 控制台")
         self.result_group.setTitle("Git 执行结果")
+        self.btn_clear_result.setText("清空")
         self.btn_clear_result.setToolTip("清理执行结果")
 
     def update_result(self, text: str, is_success: bool = True) -> None:
-        color = "#28a745" if is_success else "#dc3545"
-        self.result_label.setStyleSheet(
-            f"background-color: #f0f0f0; padding: 6px; border-radius: 4px; color: {color};"
-        )
+        summary = text.splitlines()[0].strip() if text else ""
+        self.result_summary_label.setText(summary or "等待操作")
+        self.result_summary_label.setProperty("role", "success" if is_success else "danger")
+        self.result_summary_label.style().unpolish(self.result_summary_label)
+        self.result_summary_label.style().polish(self.result_summary_label)
+        self.result_label.setProperty("role", "success" if is_success else "danger")
+        self.result_label.style().unpolish(self.result_label)
+        self.result_label.style().polish(self.result_label)
         self.result_label.appendPlainText(text)
         self.result_label.verticalScrollBar().setValue(self.result_label.verticalScrollBar().maximum())
 
     def clear_result(self) -> None:
         """清空执行结果，避免新旧批次日志混在一起。"""
+        self.result_summary_label.setText("等待操作")
+        self.result_summary_label.setProperty("role", "secondary")
+        self.result_summary_label.style().unpolish(self.result_summary_label)
+        self.result_summary_label.style().polish(self.result_summary_label)
+        self.result_label.setProperty("role", "")
+        self.result_label.style().unpolish(self.result_label)
+        self.result_label.style().polish(self.result_label)
         self.result_label.clear()
 
     def reset_switch_button(self) -> None:
@@ -153,9 +175,6 @@ class OperationPanel(QWidget):
         """
         try:
             self.btn_switch.setEnabled(True)
-            self.btn_switch.setStyleSheet(
-                "font-size: 16px; padding: 12px; background-color: #0078d4; color: white; font-weight: bold;"
-            )
         except Exception:
             if hasattr(self, "btn_switch"):
                 self.btn_switch.setEnabled(True)
