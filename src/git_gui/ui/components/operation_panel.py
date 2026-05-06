@@ -66,7 +66,7 @@ class OperationPanel(QWidget):
         options_layout = QHBoxLayout()
 
         self.chk_stash = QCheckBox("Stash 本地修改")
-        self.chk_stash.setChecked(False)  # 默认不勾选
+        self.chk_stash.setChecked(True)
 
         self.btn_console = QPushButton("打开 Git 控制台")
         self.btn_console.setIcon(get_icon(self, "console"))

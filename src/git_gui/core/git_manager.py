@@ -127,6 +127,40 @@ class GitManager:
             write_error_log("解锁异常", f"repo={repo_path}, error={e}")
             return False
 
+    def _count_unique_changed_paths(self, repo_path: Path) -> int:
+        """统计工作区涉及的唯一文件路径数量（相对仓库根）。
+
+        合并 ``git diff --name-only HEAD``（相对 HEAD 的已跟踪变动）与
+        ``git ls-files --others --exclude-standard``（未跟踪且未被忽略），
+        去重后计数；不依赖 shell 管道，Windows / macOS（Intel / Apple 芯片）一致。
+        """
+        tracked = self._run_git(repo_path, ["diff", "--name-only", "HEAD"], timeout=60)
+        untracked = self._run_git(
+            repo_path, ["ls-files", "--others", "--exclude-standard"], timeout=60
+        )
+        paths: set[str] = set()
+        for block in (tracked, untracked):
+            if not block or not block.strip():
+                continue
+            for line in block.splitlines():
+                name = line.strip()
+                if name:
+                    paths.add(name)
+        return len(paths)
+
+    def _discard_local_worktree(self, repo_path: Path) -> str:
+        """丢弃本地跟踪与未跟踪变动，为强制切线清场。
+
+        使用 ``reset --hard`` 与 ``clean -fd``，与项目内「强制提高成功率」策略一致；
+        子进程仍走 ``_run_git``，与 Windows / macOS 上隐藏控制台等封装保持一致。
+        """
+        parts: List[str] = []
+        reset_out = self._run_git(repo_path, ["reset", "--hard", "HEAD"], timeout=120)
+        parts.append(f"Discard(reset): {reset_out}")
+        clean_out = self._run_git(repo_path, ["clean", "-fd"], timeout=120)
+        parts.append(f"Discard(clean): {clean_out}")
+        return "\n".join(parts)
+
     def get_repository_status(self, repo_path: Path) -> GitRepository:
         """获取或更新仓库状态。"""
         branch = get_current_branch(repo_path)
@@ -154,8 +188,23 @@ class GitManager:
         """切换分支 (一键切线)。
 
         每次操作前强制_unlock_git，解决“旧git进程残留导致并发冲突/闪退”问题。
-        逻辑顺序：unlock -> (stash) -> fetch(-f) -> checkout -B --force。
-        使用 -B 和 --force 确保即使分支已存在也能成功。
+        逻辑顺序：unlock -> 按规则处理工作区 (stash / 丢弃) -> fetch(-f) -> checkout -B --force。
+
+        工作区规则（``git.switch_max_stash_files`` 可配置，默认 500）：
+        - 无变动文件：跳过 stash/丢弃。
+        - 唯一变动路径数超过上限：无论是否勾选 Stash，均 ``reset --hard`` + ``clean -fd``，
+          避免超大 stash 拖垮性能或失败。
+        - 未超上限且勾选 Stash：``stash push -u``（含未跟踪），再切线。
+        - 未超上限且未勾选：丢弃本地变动。
+
+        Args:
+            repo_path: 仓库根目录。
+            target_branch: 目标分支名；空则使用当前分支名（仅更新到远程同分支）。
+            stash: 是否在允许时暂存本地修改（受变动规模上限约束）。
+            callback: 可选进度回调。
+
+        Returns:
+            各步骤输出的拼接文本。
         """
         if not target_branch:
             target_branch = get_current_branch(repo_path)
@@ -169,10 +218,25 @@ class GitManager:
 
         outputs = []
 
-        # Stash 本地修改
-        if stash:
-            stash_out = self._run_git(repo_path, ["stash", "push", "-m", "Auto-stash before switch"])
-            outputs.append(f"Stash: {stash_out}")
+        max_files = int(self.settings.get("git.switch_max_stash_files", 500))
+        changed_files = self._count_unique_changed_paths(repo_path)
+
+        if changed_files > 0:
+            if changed_files > max_files:
+                outputs.append(
+                    f"本地变动文件数 {changed_files} 超过上限 {max_files}，已强制丢弃本地修改（忽略 Stash 勾选）"
+                )
+                outputs.append(self._discard_local_worktree(repo_path))
+            elif stash:
+                stash_out = self._run_git(
+                    repo_path,
+                    ["stash", "push", "-u", "-m", "Auto-stash before switch"],
+                    timeout=120,
+                )
+                outputs.append(f"Stash: {stash_out}")
+            else:
+                outputs.append("未勾选 Stash，已丢弃本地修改")
+                outputs.append(self._discard_local_worktree(repo_path))
 
         # Fetch (使用 -f 强制更新，timeout增加防卡住)
         fetch_out = self._run_git(repo_path, ["fetch", "origin", target_branch, "--no-tags", "-f"], timeout=60)

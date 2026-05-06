@@ -56,6 +56,7 @@ class Settings:
                 "fetch_args": ["--no-tags", "-f"],
                 "switch_force": True,
                 "auto_unlock": True,
+                "switch_max_stash_files": 500,
             },
             "ui": {
                 "log_max_lines": LOG_MAX_LINES,
