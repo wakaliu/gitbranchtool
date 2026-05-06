@@ -2,11 +2,17 @@
 
 支持文字描述 + 图片上传，提交到 GitHub Issues。
 """
+from __future__ import annotations
+
+from typing import Optional
+
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
                                QPushButton, QFileDialog, QListWidget, QMessageBox)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from pathlib import Path
 from ...utils.github_issue import GitHubIssueReporter
+from ...config.settings import Settings
 
 class FeedbackDialog(QDialog):
     """用户反馈对话框。"""
@@ -65,14 +71,32 @@ class FeedbackDialog(QDialog):
             QMessageBox.warning(self, "提示", "请输入反馈内容")
             return
 
-        success = self.reporter.submit_feedback(
-            title="用户反馈 - v1.0.1",
+        version = Settings().get("app.version", "1.0.0")
+        success, err_msg, browser_url = self.reporter.submit_feedback(
+            title=f"用户反馈 - v{version}",
             body=text,
-            image_paths=self.image_paths
+            image_paths=self.image_paths,
         )
 
         if success:
             QMessageBox.information(self, "成功", "反馈已提交到 GitHub Issues！感谢您的支持。")
             self.accept()
         else:
-            QMessageBox.warning(self, "提交失败", "无法连接 GitHub，请检查网络或稍后重试。")
+            self._show_submit_failed(err_msg or "提交失败，原因未知。", browser_url)
+
+    def _show_submit_failed(self, err_msg: str, browser_url: Optional[str]) -> None:
+        """API 失败时提示；若可解析出网页版 Issues 地址，提供浏览器打开（Qt 跨平台）。"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("提交失败")
+        box.setText(err_msg)
+        box.setStandardButtons(QMessageBox.NoButton)
+        btn_open = None
+        if browser_url:
+            lang = Settings().get("app.language", "zh")
+            open_label = "Open in browser (Issues)" if lang == "en" else "在浏览器中打开 Issues"
+            btn_open = box.addButton(open_label, QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if btn_open is not None and box.clickedButton() == btn_open:
+            QDesktopServices.openUrl(QUrl(browser_url))

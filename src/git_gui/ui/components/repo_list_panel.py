@@ -5,7 +5,7 @@
 """
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame,
                                QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView)
-from PySide6.QtCore import Qt, Signal, QUrl, QMimeData
+from PySide6.QtCore import Qt, QSize, Signal, QUrl, QMimeData
 from PySide6.QtGui import QDesktopServices, QDrag
 from pathlib import Path
 from ...models.repository import GitRepository
@@ -285,11 +285,13 @@ class RepoListPanel(QWidget):
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(6)
 
-        open_btn = QPushButton("打开")
+        open_btn = QPushButton()
         open_btn.setProperty("role", "compact")
         open_btn.setIcon(get_icon(self, "open"))
+        open_btn.setIconSize(QSize(18, 18))
         open_btn.setToolTip("打开目录")
-        open_btn.setFixedWidth(44)
+        open_btn.setFixedSize(30, 28)
+        open_btn.setAccessibleName("打开目录")
         open_btn.clicked.connect(lambda _, p=repo_path: self._open_directory(p))
 
         path_label = QLabel(str(repo_path))

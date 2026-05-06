@@ -23,5 +23,8 @@ favorites:
     - main
     - master
 github:
-  repo: your-username/git-gui-pull-switch-tool
-  issues_url: https://api.github.com/repos/your-username/git-gui-pull-switch-tool/issues
+  repo: wakaliu/gitbranchtool
+  issues_url: https://api.github.com/repos/wakaliu/gitbranchtool/issues
+  token: ''
+  issue_labels: []
+  feedback_issues_web_url: https://github.com/wakaliu/gitbranchtool/issues/new

@@ -82,19 +82,27 @@ class ProjectPanel(QWidget):
             self.btn_remove.setText("Remove Project")
             self.btn_clone.setText("Clone New Project")
             self.empty_hint_label.setText("No projects yet. Add or clone a project to get started.")
-            self.selection_hint_label.setText("No project selected")
-            return
-        self.title_label.setText("工程列表")
-        self.btn_add.setText("添加工程")
-        self.btn_remove.setText("移除工程")
-        self.btn_clone.setText("克隆新工程")
-        self.empty_hint_label.setText("暂无工程，请先点击“添加工程”或“克隆新工程”。")
-        self.selection_hint_label.setText("未选择工程")
+        else:
+            self.title_label.setText("工程列表")
+            self.btn_add.setText("添加工程")
+            self.btn_remove.setText("移除工程")
+            self.btn_clone.setText("克隆新工程")
+            self.empty_hint_label.setText("暂无工程，请先点击“添加工程”或“克隆新工程”。")
+        # 勿写死「未选择工程」：与主窗口 singleShot(0) 顺序有关时，语言应用会晚于恢复选中，
+        # 写死会覆盖已选中状态；始终按列表当前选中项刷新。
+        self._sync_selection_hint_from_list()
+
+    def _selected_project_paths(self) -> list[str]:
+        return [item.data(Qt.UserRole) for item in self.list_widget.selectedItems() if item.data(Qt.UserRole)]
+
+    def _sync_selection_hint_from_list(self) -> None:
+        """根据 QListWidget 当前选中项刷新提示行（与 itemSelectionChanged 解耦，供语言切换等场景）。"""
+        paths = self._selected_project_paths()
+        self._update_selected_project_hint(paths[0] if paths else None)
 
     def _on_selection_changed(self) -> None:
-        selected = [item.data(Qt.UserRole) for item in self.list_widget.selectedItems() if item.data(Qt.UserRole)]
-        self._update_selected_project_hint(selected[0] if selected else None)
-        self.project_selected.emit(selected)
+        self._sync_selection_hint_from_list()
+        self.project_selected.emit(self._selected_project_paths())
 
     def load_projects(self, projects: list[Project]) -> None:
         self.projects = projects
@@ -118,6 +126,7 @@ class ProjectPanel(QWidget):
                 self.list_widget.clearSelection()
                 item.setSelected(True)
                 self.list_widget.setCurrentItem(item)
+                self._sync_selection_hint_from_list()
                 return True
         return False
 
@@ -129,6 +138,7 @@ class ProjectPanel(QWidget):
             if first_item:
                 first_item.setSelected(True)
                 self.list_widget.setCurrentItem(first_item)
+                self._sync_selection_hint_from_list()
 
     def _update_selected_project_hint(self, selected_path: str | None) -> None:
         """显示当前选中工程与仓库数，帮助用户快速确认操作上下文。"""
