@@ -27,7 +27,7 @@ python -m src.git_gui.main
 
 | 平台 | 便携形态 | 安装包 |
 |------|-----------|--------|
-| Windows | `dist/windows-portable/GitPullSwitchTool.exe`（onefile） | `dist/windows-installer/GitPullSwitchTool-Setup-*.exe`（Inno Setup） |
+| Windows | `dist/GitPullSwitchTool.exe`（onefile） | `dist/windows-installer/GitPullSwitchTool-Setup-*.exe`（Inno Setup） |
 | macOS | `dist/macos-portable/GitPullSwitchTool.app`（onedir + `.app`） | `dist/macos-installer/GitPullSwitchTool.dmg`（`hdiutil`） |
 
 - 默认配置与 `sausage_projects.yaml` 模板来自 [`src/git_gui/bundle_data/`](src/git_gui/bundle_data/)，由 PyInstaller 打入 `bundle_data/`；首次启动在用户目录生成可写 `config.yaml`（Windows：`%LOCALAPPDATA%\\GitPullSwitchTool\\`；macOS：`~/Library/Application Support/GitPullSwitchTool/`）。

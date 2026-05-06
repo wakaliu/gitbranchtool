@@ -43,6 +43,11 @@ def main() -> None:
         default="",
         help="Override version label in zip file name (e.g. v1.0.2 from CI tag)",
     )
+    parser.add_argument(
+        "--internal",
+        action="store_true",
+        help="香肠内部版 zip 命名：GitPullSwitchTool-SausageInternal-Windows-v{version}.zip",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -57,7 +62,10 @@ def main() -> None:
     else:
         ver_label = ver
 
-    zip_name = f"GitPullSwitchTool-Windows-{ver_label}.zip"
+    if args.internal:
+        zip_name = f"GitPullSwitchTool-SausageInternal-Windows-{ver_label}.zip"
+    else:
+        zip_name = f"GitPullSwitchTool-Windows-{ver_label}.zip"
     zip_path = dist_dir / zip_name
 
     readme_name = "使用说明-Windows.txt"

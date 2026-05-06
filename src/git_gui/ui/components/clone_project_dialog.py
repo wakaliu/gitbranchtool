@@ -35,7 +35,12 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.settings import Settings
-from ...utils.runtime_paths import get_embedded_assets_dir, get_repository_root, is_pyinstaller_bundle
+from ...utils.runtime_paths import (
+    get_embedded_assets_dir,
+    get_executable_dir,
+    get_repository_root,
+    is_pyinstaller_bundle,
+)
 from ...utils.subprocess_helpers import subprocess_hide_console_kwargs
 
 
@@ -197,9 +202,11 @@ class CloneProjectDialog(QDialog):
             self.config_tabs.setTabText(0, "Custom Project" if is_en else "自定义 / 其他项目")
 
     def _resolve_internal_profile_path(self) -> Path | None:
-        """优先仓库根目录下的 sausage_projects.yaml，其次内置 bundle（冻结包内）。"""
+        """解析内部克隆配置：冻结版支持 exe 旁路覆盖，其次内置 bundle；开发版先仓库根再 bundle。"""
         candidates: list[Path] = []
-        if not is_pyinstaller_bundle():
+        if is_pyinstaller_bundle():
+            candidates.append(get_executable_dir() / "sausage_projects.yaml")
+        else:
             candidates.append(get_repository_root() / "sausage_projects.yaml")
         candidates.append(get_embedded_assets_dir() / "sausage_projects.yaml")
         for path in candidates:
