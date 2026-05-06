@@ -12,6 +12,8 @@ $distPortable = Join-Path $Root "dist\windows-portable"
 
 pyinstaller --noconfirm --clean --distpath $distPortable --workpath $workWin $specWin
 
+python (Join-Path $Root "scripts\package_windows_zip.py") --dist-dir $distPortable
+
 $iss = Join-Path $Root "packaging\windows\GitPullSwitchTool.iss"
 $iscc = @(
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
