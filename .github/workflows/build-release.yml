@@ -47,11 +47,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Build universal2 (.app + DMG)
-        run: chmod +x scripts/build_macos.sh && ./scripts/build_macos.sh
+      - name: Build universal2 (.app + DMG, public + internal if sausage_projects.yaml)
+        run: chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh && ./scripts/build_macos.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos-packages
           path: |
-            dist/macos-portable/GitPullSwitchTool.app
+            dist/macos-portable/*.app
             dist/macos-installer/*.dmg

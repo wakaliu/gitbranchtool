@@ -39,6 +39,11 @@ if not bundle_sausage.is_file():
     raise FileNotFoundError(f"缺少: {bundle_sausage}")
 
 app_base = "GitPullSwitchTool-Sausage" if sausage_internal else "GitPullSwitchTool"
+bundle_identifier = (
+    "com.sausagedev.gitpullswitchtool.sausage"
+    if sausage_internal
+    else "com.sausagedev.gitpullswitchtool"
+)
 
 icns_path = project_root / "assets" / "icon.icns"
 icon_str = str(icns_path) if icns_path.is_file() else None
@@ -89,7 +94,7 @@ app = BUNDLE(
     coll,
     name=f"{app_base}.app",
     icon=icon_str,
-    bundle_identifier="com.sausagedev.gitpullswitchtool",
+    bundle_identifier=bundle_identifier,
     info_plist={
         "NSPrincipalClass": "NSApplication",
         "NSHighResolutionCapable": "True",

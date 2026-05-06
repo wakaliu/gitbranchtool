@@ -28,7 +28,8 @@ python -m src.git_gui.main
 | 平台 | 便携形态 | 安装包 |
 |------|-----------|--------|
 | Windows | `dist/GitPullSwitchTool.exe`（onefile） | `dist/windows-installer/GitPullSwitchTool-Setup-*.exe`（Inno Setup） |
-| macOS | `dist/macos-portable/GitPullSwitchTool.app`（onedir + `.app`） | `dist/macos-installer/GitPullSwitchTool.dmg`（`hdiutil`） |
+| macOS（公开） | `dist/macos-portable/GitPullSwitchTool.app` | `dist/macos-installer/GitPullSwitchTool.dmg` |
+| macOS（内部） | `dist/macos-portable/GitPullSwitchTool-Sausage.app` | `dist/macos-installer/GitPullSwitchTool-Sausage.dmg` |
 
 - 默认配置与 `sausage_projects.yaml` 模板来自 [`src/git_gui/bundle_data/`](src/git_gui/bundle_data/)，由 PyInstaller 打入 `bundle_data/`；首次启动在用户目录生成可写 `config.yaml`（Windows：`%LOCALAPPDATA%\\GitPullSwitchTool\\`；macOS：`~/Library/Application Support/GitPullSwitchTool/`）。
 - 图标可选：将 `assets/icon.ico` / `assets/icon.icns` 放入仓库后重新打包即可，见 [`assets/README.md`](assets/README.md)。
@@ -44,10 +45,13 @@ python -m src.git_gui.main
 ```
 
 ```bash
-# macOS（仓库根目录）
-chmod +x scripts/build_macos.sh
-./scripts/build_macos.sh
+# macOS（仓库根目录，universal2：M 芯片 + Intel）
+chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
+./scripts/build_macos.sh              # 公开版 + 若存在 sausage_projects.yaml 则再打内部版
+./scripts/build_macos.sh --public-only # 仅公开版（CI 无内部 yaml 时等价）
 ```
+
+内部版需在仓库根放置 `sausage_projects.yaml`（勿提交 Git，见 `.gitignore`），逻辑与 `scripts/build_windows_dual.ps1` 一致。
 
 底层 spec 位于 [`packaging/pyinstaller/`](packaging/pyinstaller/)，便于与 `.gitignore` 中的通用 `build/` 临时目录区分。
 
@@ -71,7 +75,9 @@ packaging/
 └── macos/                # DMG 封装脚本
 scripts/
 ├── build_windows.ps1
-└── build_macos.sh
+├── build_windows_dual.ps1
+├── build_macos.sh
+└── build_macos_dual.sh
 src/git_gui/
 ├── main.py                 # 入口
 ├── bundle_data/            # 打包内置默认配置（只读）
