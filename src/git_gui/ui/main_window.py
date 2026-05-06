@@ -752,7 +752,12 @@ class MainWindow(QMainWindow):
         self._update_workspace_header()
 
     def _show_about(self) -> None:
-        QMessageBox.about(self, "关于", "Git 拉线切线工具 v1.0.1\n\n专为多仓库项目设计的批量切分支工具。\n支持 Windows / macOS (Intel & M 芯片)。")
+        ver = self.settings.get("app.version", "1.0.0")
+        QMessageBox.about(
+            self,
+            "关于",
+            f"Git 拉线切线工具 v{ver}\n\n专为多仓库项目设计的批量切分支工具。\n支持 Windows / macOS (Intel & M 芯片)。",
+        )
 
     def _update_workspace_header(self) -> None:
         """更新顶部工程摘要，帮助非开发用户快速理解当前上下文。"""

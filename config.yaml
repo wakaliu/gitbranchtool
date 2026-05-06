@@ -1,6 +1,6 @@
 app:
   name: Git 拉线切线工具
-  version: 1.0.0
+  version: 1.0.2
   language: zh
   theme: light
   default_language: zh

@@ -5,6 +5,8 @@ datas 中的 bundle_data 与 runtime_paths.get_embedded_assets_dir() 约定一�
 """
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
 project_root = Path(SPECPATH).resolve().parent.parent
 entry = project_root / "src" / "git_gui" / "main.py"
@@ -17,7 +19,8 @@ a = Analysis(
     pathex=[str(project_root)],
     binaries=[],
     datas=[(str(bundle_data), "bundle_data")],
-    hiddenimports=["git", "yaml", "requests", "psutil"],
+    hiddenimports=["git", "yaml", "requests", "psutil"]
+    + collect_submodules("keyring"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
