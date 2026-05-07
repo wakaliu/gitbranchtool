@@ -109,5 +109,7 @@ app = BUNDLE(
     info_plist={
         "NSPrincipalClass": "NSApplication",
         "NSHighResolutionCapable": "True",
+        # PySide6 6.5 所带 Qt 为 minos 11.0；低于 11 的系统在 dyld 阶段即无法加载 Qt 框架。
+        "LSMinimumSystemVersion": "11.0",
     },
 )

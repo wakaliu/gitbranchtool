@@ -34,6 +34,8 @@ python -m src.git_gui.main
 - 默认配置与 `sausage_projects.yaml` 模板来自 [`src/git_gui/bundle_data/`](src/git_gui/bundle_data/)，由 PyInstaller 打入 `bundle_data/`；首次启动在用户目录生成可写 `config.yaml`（Windows：`%LOCALAPPDATA%\\GitPullSwitchTool\\`；macOS：`~/Library/Application Support/GitPullSwitchTool/`）。
 - 图标可选：将 `assets/icon.ico` / `assets/icon.icns` 放入仓库后重新打包即可，见 [`assets/README.md`](assets/README.md)。
 - 未做代码签名时，macOS 可能出现 Gatekeeper 拦截，可在「隐私与安全性」中放行或使用开发者证书签名/公证后分发。
+- **macOS 系统要求（打包版）**：当前依赖 **PySide6 6.5 / Qt 6.5**，官方预编译框架的最低系统为 **macOS 11（Big Sur）**（`QtCore` 等库为 `minos 11.0`）。**macOS 10.15（Catalina）及更早版本无法运行**，在 Intel 上会表现为启动即闪退或 dyld 报错，与「仅 M 芯片能开」无关，实为系统版本过低。
+- **备注（旧系统兼容，当前未实施）**：无法在保留「单包 + 仅 PySide6」的前提下支持 10.15。若日后确有需求，可选方案包括：单独打 **legacy** 包（**PySide2 5.15 + Qt 5**，通常 **x86_64** 面向 Intel 旧机），或引入 **qtpy** 统一 import 后维护 **两套依赖与两次 PyInstaller**；自编译 Qt6 降 deployment target 成本高且不推荐。仓库当前不落地上述改造，仅作文档备忘。
 
 ### 本机构建
 
