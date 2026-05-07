@@ -292,7 +292,8 @@ class RepoListPanel(QWidget):
         open_btn.setToolTip("打开目录")
         open_btn.setFixedSize(30, 28)
         open_btn.setAccessibleName("打开目录")
-        open_btn.clicked.connect(lambda _, p=repo_path: self._open_directory(p))
+        # PySide6 的 clicked 为无参 Signal；若写成 lambda _: 会在运行时因少传参而 TypeError，表现为按钮无反应。
+        open_btn.clicked.connect(lambda *args, p=repo_path: self._open_directory(p))
 
         path_label = QLabel(str(repo_path))
         path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)

@@ -23,18 +23,32 @@ class ProjectManager:
     def __init__(self):
         self.settings = Settings()
         self.projects: List[Project] = []
-        self._load_projects()
+        self._load_projects_shell()
 
-    def _load_projects(self) -> None:
-        """从配置加载最近工程，保持用户调整的顺序。"""
+    def _load_projects_shell(self) -> None:
+        """从配置恢复工程路径与名称，不扫描磁盘上的 Git 仓库。
+
+        全量扫描在启动阶段放到后台线程，避免主线程阻塞导致窗口迟迟不出现；
+        大工程（如 Unity）下递归目录与逐仓库 git 调用可达数秒以上。
+        """
         recent_paths = self.settings.get_recent_projects()
         self.projects.clear()
         for p in recent_paths:
             path = Path(p)
             if path.exists():
-                project = Project(path=path)
+                self.projects.append(Project(path=path))
+
+    def scan_projects_for_paths(self, paths: List[Path]) -> None:
+        """对给定路径对应的已加载工程执行全量扫描并写回配置。
+
+        供启动后台任务使用：在子线程中调用，仅触碰各自 Project 与只读配置查询，
+        完成后由主线程刷新 UI。paths 应在进入线程前从 ``list(projects)`` 拷贝。
+        """
+        for path in paths:
+            project = self.get_project_by_path(path)
+            if project:
                 self._scan_project(project)
-                self.projects.append(project)
+        self._save_projects()
 
     def add_project(self, path: Path) -> Optional[Project]:
         """添加新工程并立即扫描（扫描操作可能耗时，调用方应在后台线程中执行）。"""

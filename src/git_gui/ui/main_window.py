@@ -64,6 +64,7 @@ class MainWindow(QMainWindow):
         self._load_initial_data()
         QTimer.singleShot(0, self._restore_initial_project_selection)
         QTimer.singleShot(0, self._apply_settings_to_ui)
+        QTimer.singleShot(0, self._run_startup_project_scan)
         self._auto_refresh_timer.start()
 
         self.setWindowTitle(f"{self.settings.get('app.name')} v{self.settings.get('app.version')}")
@@ -168,6 +169,34 @@ class MainWindow(QMainWindow):
 
     def _load_initial_data(self) -> None:
         self.project_panel.load_projects(self.project_manager.projects)
+
+    def _run_startup_project_scan(self) -> None:
+        """首帧后再于后台扫描各工程内 Git 仓库，避免阻塞事件循环导致窗口白屏过久。"""
+        paths = [p.path for p in list(self.project_manager.projects)]
+        if not paths:
+            return
+
+        def scan_initial() -> None:
+            self.project_manager.scan_projects_for_paths(paths)
+
+        worker = Worker(scan_initial)
+        worker.signals.finished.connect(self._on_startup_project_scan_finished)
+        worker.signals.error.connect(
+            lambda err: self.dispatch_to_main.emit(
+                lambda e=err: self.logger.append(f"启动扫描工程失败: {e}")
+            )
+        )
+        self.thread_pool.start(worker)
+
+    def _on_startup_project_scan_finished(self, _result: object) -> None:
+        """后台扫描完成后在主线程刷新工程列表与当前工程下的仓库表。"""
+        saved = self.current_project_path
+        self.project_panel.load_projects(self.project_manager.projects)
+        if saved and self.project_panel.select_project_by_path(saved):
+            self._on_project_selected([str(saved)])
+        elif self.project_manager.projects:
+            self.project_panel.select_first_project()
+            self._on_project_selected([str(self.project_manager.projects[0].path)])
 
     def _restore_initial_project_selection(self) -> None:
         """窗口显示后恢复默认工程选中，避免初始化阶段选中状态丢失。"""
