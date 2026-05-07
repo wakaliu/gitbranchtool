@@ -7,9 +7,76 @@ from pathlib import Path
 import threading
 import faulthandler
 import os
+import subprocess
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QCoreApplication, qInstallMessageHandler
+
+def _fatal_logs_dir() -> Path:
+    """与 runtime_paths 对齐的日志目录，仅依赖标准库，供 PySide6 未安装时仍能落盘。"""
+    app = "GitPullSwitchTool"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / app / "logs"
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        return Path(local) / app / "logs"
+    return Path.home() / ".local" / "share" / app / "logs"
+
+
+def _write_startup_fatal_log(title: str, detail: str) -> Path:
+    """将致命启动错误写入固定路径，避免双击 .app 无终端时完全无据可查。"""
+    log_dir = _fatal_logs_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "startup-fatal.log"
+    path.write_text(f"{title}\n\n{detail}\n", encoding="utf-8")
+    return path
+
+
+def _hint_fix_pyside() -> str:
+    if getattr(sys, "frozen", False):
+        return "当前为打包版：请重新用完整依赖环境构建安装包，或向发布方索取可运行版本。"
+    root = Path(__file__).resolve().parents[2]
+    req = root / "requirements.txt"
+    if req.is_file():
+        return f"请在仓库根执行:\n  python3 -m pip install --force-reinstall -r {req}"
+    return "请执行: python3 -m pip install --force-reinstall PySide6-Essentials PySide6"
+
+
+def _notify_startup_fatal(log_path: Path, summary: str) -> None:
+    """在无 Qt 时使用系统原生提示，便于非开发者发现失败原因。"""
+    if sys.platform == "darwin":
+        try:
+            esc = summary.replace("\\", "\\\\").replace('"', '\\"')
+            esc_path = str(log_path).replace("\\", "\\\\").replace('"', '\\"')
+            # Popen：避免 run 阻塞至用户点掉对话框后才退出（脚本/自动化会挂死）。
+            subprocess.Popen(
+                [
+                    "osascript",
+                    "-e",
+                    f'display alert "GitPullSwitchTool 无法启动" '
+                    f'message "{esc}\\n\\n详细日志:\\n{esc_path}" as critical',
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    elif os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, f"{summary}\n\n日志:\n{log_path}", "GitPullSwitchTool", 0x10)
+        except Exception:
+            pass
+
+
+try:
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt, QCoreApplication, qInstallMessageHandler
+except ImportError as exc:
+    detail = f"{type(exc).__name__}: {exc}\n\n{_hint_fix_pyside()}"
+    log_path = _write_startup_fatal_log("无法导入 PySide6（图形界面依赖缺失）", detail)
+    _notify_startup_fatal(log_path, "缺少 PySide6，无法启动图形界面。")
+    sys.exit(1)
 
 if __package__ in (None, ""):
     # 兼容直接脚本启动: python src/git_gui/main.py

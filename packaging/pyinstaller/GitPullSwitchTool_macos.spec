@@ -7,6 +7,8 @@
 import os
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+
 block_cipher = None
 project_root = Path(SPECPATH).resolve().parent.parent
 entry = project_root / "src" / "git_gui" / "main.py"
@@ -38,6 +40,9 @@ if sausage_internal:
 if not bundle_sausage.is_file():
     raise FileNotFoundError(f"缺少: {bundle_sausage}")
 
+# Analysis 阶段未稳定解析入口脚本对 PySide6 的依赖时，显式收集 Qt 运行时与元数据，避免 .app 内缺库闪退。
+_pyside6_datas, _pyside6_binaries, _pyside6_hidden = collect_all("PySide6")
+
 app_base = "GitPullSwitchTool-Sausage" if sausage_internal else "GitPullSwitchTool"
 bundle_identifier = (
     "com.sausagedev.gitpullswitchtool.sausage"
@@ -48,12 +53,18 @@ bundle_identifier = (
 icns_path = project_root / "assets" / "icon.icns"
 icon_str = str(icns_path) if icns_path.is_file() else None
 
+_keyring_hidden = list(collect_submodules("keyring"))
+
 a = Analysis(
     [str(entry)],
     pathex=[str(project_root)],
-    binaries=[],
-    datas=_bundle_datas,
-    hiddenimports=["git", "yaml", "requests", "psutil"],
+    binaries=_pyside6_binaries,
+    datas=_bundle_datas + _pyside6_datas,
+    hiddenimports=(
+        ["git", "yaml", "requests", "psutil"]
+        + _pyside6_hidden
+        + _keyring_hidden
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -71,7 +82,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=True,
@@ -86,7 +97,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name=app_base,
 )

@@ -18,6 +18,12 @@ done
 python3 -m pip install -U pip wheel
 python3 -m pip install -r requirements.txt pyinstaller --no-compile
 
+if ! python3 -c "from PySide6.QtWidgets import QApplication" 2>/dev/null; then
+  echo "PySide6 图形模块不可用（常见于 site-packages 中缺失 QtWidgets.abi3.so）。请重装与 requirements 一致的版本，例如：" >&2
+  echo "  python3 -m pip install --force-reinstall -r ${ROOT}/requirements.txt" >&2
+  exit 1
+fi
+
 if ! arch -arm64 uname -m >/dev/null 2>&1; then
   echo "universal2 构建需要在 Apple Silicon 环境上执行。" >&2
   exit 1
@@ -85,7 +91,7 @@ MAKE_DMG="${ROOT}/packaging/macos/make_dmg.sh"
 mkdir -p "${DIST_APP}"
 
 unset GITTOOL_SAUSAGE_INTERNAL || true
-pyinstaller --noconfirm --clean --distpath "$DIST_APP" --workpath "${ROOT}/packaging/pyinstaller/work-macos-public" "$SPEC"
+python3 -m PyInstaller --noconfirm --clean --distpath "$DIST_APP" --workpath "${ROOT}/packaging/pyinstaller/work-macos-public" "$SPEC"
 chmod +x "${MAKE_DMG}"
 "${MAKE_DMG}" "${DIST_APP}/GitPullSwitchTool.app" "GitPullSwitchTool.dmg" "GitPullSwitchTool"
 echo "公开版: ${DIST_APP}/GitPullSwitchTool.app 与 dist/macos-installer/GitPullSwitchTool.dmg"
@@ -101,7 +107,7 @@ if [[ ! -f "${ROOT_YAML}" ]]; then
 fi
 
 export GITTOOL_SAUSAGE_INTERNAL=1
-pyinstaller --noconfirm --clean --distpath "$DIST_APP" --workpath "${ROOT}/packaging/pyinstaller/work-macos-sausage" "$SPEC"
+python3 -m PyInstaller --noconfirm --clean --distpath "$DIST_APP" --workpath "${ROOT}/packaging/pyinstaller/work-macos-sausage" "$SPEC"
 unset GITTOOL_SAUSAGE_INTERNAL || true
 "${MAKE_DMG}" "${DIST_APP}/GitPullSwitchTool-Sausage.app" "GitPullSwitchTool-Sausage.dmg" "GitPullSwitchTool-Sausage"
 echo "内部版: ${DIST_APP}/GitPullSwitchTool-Sausage.app 与 dist/macos-installer/GitPullSwitchTool-Sausage.dmg"
