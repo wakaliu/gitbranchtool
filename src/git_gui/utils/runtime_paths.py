@@ -34,6 +34,12 @@ def get_embedded_assets_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "bundle_data"
 
 
+def get_app_icon_png_path() -> Path | None:
+    """窗口/任务栏图标使用的 PNG 路径（bundle_data/app_icon.png），缺失时返回 None。"""
+    p = get_embedded_assets_dir() / "app_icon.png"
+    return p if p.is_file() else None
+
+
 def get_user_data_dir() -> Path:
     """用户可写数据根目录（配置持久化、日志等）。"""
     if sys.platform == "darwin":

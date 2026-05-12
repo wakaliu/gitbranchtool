@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import sys
 import yaml
 from typing import Any, Dict
 from .constants import (
@@ -80,6 +81,16 @@ class Settings:
                     self._merge_config(self._config, user_config)
             except Exception:
                 pass  # 配置文件损坏时使用默认值，避免启动失败
+
+        if getattr(sys, "frozen", False):
+            app_cfg = self._config.setdefault("app", {})
+            if str(app_cfg.get("version", "")).strip() != APP_VERSION:
+                app_cfg["version"] = APP_VERSION
+                try:
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        yaml.dump(self._config, f, allow_unicode=True, sort_keys=False)
+                except Exception:
+                    pass
 
     def _merge_config(self, base: Dict, override: Dict) -> None:
         """递归合并配置字典。"""

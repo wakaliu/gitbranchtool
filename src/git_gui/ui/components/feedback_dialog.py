@@ -13,6 +13,7 @@ from PySide6.QtGui import QDesktopServices
 from pathlib import Path
 from ...utils.github_issue import GitHubIssueReporter
 from ...config.settings import Settings
+from ...config.constants import APP_VERSION
 
 class FeedbackDialog(QDialog):
     """用户反馈对话框。"""
@@ -71,7 +72,7 @@ class FeedbackDialog(QDialog):
             QMessageBox.warning(self, "提示", "请输入反馈内容")
             return
 
-        version = Settings().get("app.version", "1.0.0")
+        version = Settings().get("app.version", APP_VERSION)
         success, err_msg, browser_url = self.reporter.submit_feedback(
             title=f"用户反馈 - v{version}",
             body=text,

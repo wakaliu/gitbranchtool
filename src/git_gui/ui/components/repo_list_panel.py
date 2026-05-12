@@ -94,6 +94,7 @@ class RepoListPanel(QWidget):
         super().__init__(parent)
         self.repositories: list[GitRepository] = []
         self._checked_state_by_path: dict[str, bool] = {}
+        self._repositories_loading: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -153,14 +154,59 @@ class RepoListPanel(QWidget):
         self.repo_table.setColumnWidth(4, 520)
         self.repo_table.reorder_requested.connect(self._on_reorder_requested)
         layout.addWidget(self.repo_table)
+        self.loading_label = QLabel()
+        self.loading_label.setProperty("role", "secondary")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setWordWrap(True)
+        self.loading_label.setMinimumHeight(120)
+        self.loading_label.hide()
+        layout.addWidget(self.loading_label)
         self.empty_hint_label = QLabel("当前工程暂无仓库，请先刷新或重新添加工程。")
         self.empty_hint_label.setProperty("role", "secondary")
         self.empty_hint_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.empty_hint_label)
         self.apply_language("zh")
 
+    def set_repositories_loading(self, loading: bool) -> None:
+        """在后台扫描仓库期间显示加载提示，避免误显示为「空列表」。"""
+        self._repositories_loading = loading
+        if loading:
+            self.repo_table.hide()
+            self.empty_hint_label.hide()
+            self.loading_label.setText(
+                self._loading_text_en if self._loading_lang == "en" else self._loading_text_zh
+            )
+            self.loading_label.show()
+            for w in (
+                self.btn_select_all,
+                self.btn_refresh,
+                self.btn_fetch,
+                self.btn_slim,
+            ):
+                w.setEnabled(False)
+            return
+        self.loading_label.hide()
+        for w in (
+            self.btn_select_all,
+            self.btn_refresh,
+            self.btn_fetch,
+            self.btn_slim,
+        ):
+            w.setEnabled(True)
+        self.repo_table.show()
+
     def load_repositories(self, repos: list[GitRepository]) -> None:
         """加载仓库表格，按需求显示状态/分支/同步/仓库名/路径。"""
+        self._repositories_loading = False
+        self.loading_label.hide()
+        self.repo_table.show()
+        for w in (
+            self.btn_select_all,
+            self.btn_refresh,
+            self.btn_fetch,
+            self.btn_slim,
+        ):
+            w.setEnabled(True)
         # 先保留当前勾选状态（按路径）
         self._capture_checked_state()
         self.repositories = repos
@@ -194,6 +240,9 @@ class RepoListPanel(QWidget):
 
     def apply_language(self, language: str) -> None:
         """应用仓库列表面板文案语言。"""
+        self._loading_lang = language
+        self._loading_text_zh = "正在扫描并加载仓库，请稍候…"
+        self._loading_text_en = "Scanning repositories, please wait…"
         if language == "en":
             self.title_label.setText("Repositories")
             self.btn_select_all.setText("Select/Invert")
@@ -202,14 +251,18 @@ class RepoListPanel(QWidget):
             self.btn_slim.setText("Cleanup")
             self.empty_hint_label.setText("No repositories in current project. Refresh or re-add the project.")
             self.repo_table.setHorizontalHeaderLabels(["State", "Branch", "Sync", "Repo", "Path"])
-            return
-        self.title_label.setText("仓库列表")
-        self.btn_select_all.setText("全选/反选")
-        self.btn_refresh.setText("刷新")
-        self.btn_fetch.setText("Fetch")
-        self.btn_slim.setText("一键瘦身")
-        self.empty_hint_label.setText("当前工程暂无仓库，请先刷新或重新添加工程。")
-        self.repo_table.setHorizontalHeaderLabels(["状态", "当前分支", "同步", "仓库名", "路径"])
+        else:
+            self.title_label.setText("仓库列表")
+            self.btn_select_all.setText("全选/反选")
+            self.btn_refresh.setText("刷新")
+            self.btn_fetch.setText("Fetch")
+            self.btn_slim.setText("一键瘦身")
+            self.empty_hint_label.setText("当前工程暂无仓库，请先刷新或重新添加工程。")
+            self.repo_table.setHorizontalHeaderLabels(["状态", "当前分支", "同步", "仓库名", "路径"])
+        if self._repositories_loading:
+            self.loading_label.setText(
+                self._loading_text_en if language == "en" else self._loading_text_zh
+            )
 
     def _on_fetch_clicked(self) -> None:
         selected = self.get_selected_repo_paths()

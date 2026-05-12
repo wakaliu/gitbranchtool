@@ -7,12 +7,12 @@ from __future__ import annotations
 from PySide6.QtWidgets import (QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout, QMenuBar,
                                QMenu, QMessageBox, QFileDialog, QStatusBar, QLabel, QPushButton, QGroupBox)
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QIcon
 from pathlib import Path
 import sys
 from typing import List
 
 from ..config.settings import Settings
+from ..config.constants import APP_VERSION
 from ..core.project_manager import ProjectManager
 from ..core.git_manager import GitManager
 from ..utils.logger import OperationLogger
@@ -54,6 +54,7 @@ class MainWindow(QMainWindow):
         self._active_stable_worker: Worker | None = None
         self._active_parallel_workers: list[Worker] = []
         self._inactive_project_paths: set[Path] = set()
+        self._initial_repo_scan_pending: bool = False
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(5 * 60 * 1000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_current_project_status)
@@ -62,9 +63,12 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self.dispatch_to_main.connect(self._execute_in_main_thread)
         self._load_initial_data()
+        self._initial_repo_scan_pending = bool(self.project_manager.projects)
+        if self._initial_repo_scan_pending:
+            self.repo_panel.set_repositories_loading(True)
         QTimer.singleShot(0, self._restore_initial_project_selection)
-        QTimer.singleShot(0, self._apply_settings_to_ui)
         QTimer.singleShot(0, self._run_startup_project_scan)
+        QTimer.singleShot(1, self._apply_settings_to_ui)
         self._auto_refresh_timer.start()
 
         self.setWindowTitle(f"{self.settings.get('app.name')} v{self.settings.get('app.version')}")
@@ -174,6 +178,8 @@ class MainWindow(QMainWindow):
         """首帧后再于后台扫描各工程内 Git 仓库，避免阻塞事件循环导致窗口白屏过久。"""
         paths = [p.path for p in list(self.project_manager.projects)]
         if not paths:
+            self._initial_repo_scan_pending = False
+            self.repo_panel.set_repositories_loading(False)
             return
 
         def scan_initial() -> None:
@@ -183,13 +189,15 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(self._on_startup_project_scan_finished)
         worker.signals.error.connect(
             lambda err: self.dispatch_to_main.emit(
-                lambda e=err: self.logger.append(f"启动扫描工程失败: {e}")
+                lambda e=err: self._on_startup_project_scan_failed(e)
             )
         )
         self.thread_pool.start(worker)
 
     def _on_startup_project_scan_finished(self, _result: object) -> None:
         """后台扫描完成后在主线程刷新工程列表与当前工程下的仓库表。"""
+        self._initial_repo_scan_pending = False
+        self.repo_panel.set_repositories_loading(False)
         saved = self.current_project_path
         self.project_panel.load_projects(self.project_manager.projects)
         if saved and self.project_panel.select_project_by_path(saved):
@@ -197,6 +205,17 @@ class MainWindow(QMainWindow):
         elif self.project_manager.projects:
             self.project_panel.select_first_project()
             self._on_project_selected([str(self.project_manager.projects[0].path)])
+
+    def _on_startup_project_scan_failed(self, err: str) -> None:
+        """启动扫描失败时仍需结束加载态，避免界面永久停在「加载中」。"""
+        self._initial_repo_scan_pending = False
+        self.repo_panel.set_repositories_loading(False)
+        self.logger.append(f"启动扫描工程失败: {err}")
+        if self.current_project_path:
+            for p in self.project_manager.projects:
+                if p.path == self.current_project_path:
+                    self.repo_panel.load_repositories(p.repositories)
+                    break
 
     def _restore_initial_project_selection(self) -> None:
         """窗口显示后恢复默认工程选中，避免初始化阶段选中状态丢失。"""
@@ -218,7 +237,10 @@ class MainWindow(QMainWindow):
         # 找到第一个选中的工程，加载其仓库
         for p in self.project_manager.projects:
             if str(p.path) in selected_paths:
-                self.repo_panel.load_repositories(p.repositories)
+                if self._initial_repo_scan_pending and not p.repositories:
+                    self.repo_panel.set_repositories_loading(True)
+                else:
+                    self.repo_panel.load_repositories(p.repositories)
                 break
         self._update_workspace_header()
 
@@ -684,11 +706,16 @@ class MainWindow(QMainWindow):
             return results
 
         def queue_switch_done(results):
-            """下一轮事件循环再收尾，避免与进度条 setValue(100) 同栈重入导致关窗无效。"""
-            QTimer.singleShot(0, self, lambda r=results: on_done(r))
+            """必须回到主线程再收尾：finished 从线程池发出时，直连槽会在后台线程执行，
+            此时 QTimer 绑定主窗口无效，会导致进度弹窗永远不关。"""
+            self.dispatch_to_main.emit(
+                lambda r=results: QTimer.singleShot(0, self, lambda: on_done(r))
+            )
 
         def queue_switch_fail(err):
-            QTimer.singleShot(0, self, lambda e=err: on_fail(e))
+            self.dispatch_to_main.emit(
+                lambda e=err: QTimer.singleShot(0, self, lambda: on_fail(e))
+            )
 
         worker = Worker(run_all_with_cancel_check)
         worker.setAutoDelete(False)
@@ -781,7 +808,7 @@ class MainWindow(QMainWindow):
         self._update_workspace_header()
 
     def _show_about(self) -> None:
-        ver = self.settings.get("app.version", "1.0.0")
+        ver = self.settings.get("app.version", APP_VERSION)
         QMessageBox.about(
             self,
             "关于",

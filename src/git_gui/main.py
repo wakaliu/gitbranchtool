@@ -72,6 +72,7 @@ def _notify_startup_fatal(log_path: Path, summary: str) -> None:
 try:
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt, QCoreApplication, qInstallMessageHandler
+    from PySide6.QtGui import QIcon
 except ImportError as exc:
     detail = f"{type(exc).__name__}: {exc}\n\n{_hint_fix_pyside()}"
     log_path = _write_startup_fatal_log("无法导入 PySide6（图形界面依赖缺失）", detail)
@@ -86,12 +87,12 @@ if __package__ in (None, ""):
     from src.git_gui.config.settings import Settings
     from src.git_gui.ui.main_window import MainWindow
     from src.git_gui.utils.logger import write_exception_log, write_error_log
-    from src.git_gui.utils.runtime_paths import get_logs_dir, get_application_root_for_diagnostics
+    from src.git_gui.utils.runtime_paths import get_logs_dir, get_application_root_for_diagnostics, get_app_icon_png_path
 else:
     from .config.settings import Settings
     from .ui.main_window import MainWindow
     from .utils.logger import write_exception_log, write_error_log
-    from .utils.runtime_paths import get_logs_dir, get_application_root_for_diagnostics
+    from .utils.runtime_paths import get_logs_dir, get_application_root_for_diagnostics, get_app_icon_png_path
 
 _LOG_DIR = get_logs_dir()
 _PROJECT_ROOT = get_application_root_for_diagnostics()
@@ -164,6 +165,9 @@ def main() -> None:
         app = QApplication(sys.argv)
         app.setApplicationName("GitPullSwitchTool")
         app.setOrganizationName("SausageDev")
+        icon_path = get_app_icon_png_path()
+        if icon_path is not None:
+            app.setWindowIcon(QIcon(str(icon_path)))
 
         # 加载设置 (确保 config.yaml 存在)
         settings = Settings()
