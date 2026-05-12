@@ -8,6 +8,10 @@ Remove-Item Env:\GITTOOL_SAUSAGE_INTERNAL -ErrorAction SilentlyContinue
 
 python -m pip install -U pip wheel
 pip install -r requirements.txt pyinstaller
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+python -m pip uninstall -y typing 2>&1 | Out-Null
+$ErrorActionPreference = $prevEap
 
 $workWin = Join-Path $Root "packaging\pyinstaller\work-win"
 $specWin = Join-Path $Root "packaging\pyinstaller\GitPullSwitchTool_windows.spec"

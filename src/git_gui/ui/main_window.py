@@ -706,16 +706,12 @@ class MainWindow(QMainWindow):
             return results
 
         def queue_switch_done(results):
-            """必须回到主线程再收尾：finished 从线程池发出时，直连槽会在后台线程执行，
-            此时 QTimer 绑定主窗口无效，会导致进度弹窗永远不关。"""
-            self.dispatch_to_main.emit(
-                lambda r=results: QTimer.singleShot(0, self, lambda: on_done(r))
-            )
+            """Worker 的 finished 可能在工作线程触发；必须通过 dispatch_to_main 在主线程执行 on_done，
+            否则 QProgressDialog 的 accept/close 无效，弹窗会卡在 100%。"""
+            self.dispatch_to_main.emit(lambda r=results: on_done(r))
 
         def queue_switch_fail(err):
-            self.dispatch_to_main.emit(
-                lambda e=err: QTimer.singleShot(0, self, lambda: on_fail(e))
-            )
+            self.dispatch_to_main.emit(lambda e=err: on_fail(e))
 
         worker = Worker(run_all_with_cancel_check)
         worker.setAutoDelete(False)
