@@ -12,6 +12,42 @@ from pathlib import Path
 from PIL import Image, ImageFilter
 
 
+def _premultiply_rgba(im: Image.Image) -> Image.Image:
+    """与 compose 脚本一致：预乘后再缩放，减轻半透明边在缩小后的发灰、发糊。"""
+    im = im.convert("RGBA")
+    px = im.load()
+    w, h = im.size
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ox = out.load()
+    for yy in range(h):
+        for xx in range(w):
+            r, g, b, a = px[xx, yy]
+            if a == 0:
+                continue
+            f = a / 255.0
+            ox[xx, yy] = (int(r * f + 0.5), int(g * f + 0.5), int(b * f + 0.5), a)
+    return out
+
+
+def _demultiply_rgba(im: Image.Image) -> Image.Image:
+    """将预乘域像素还原为常规 RGBA（与 _premultiply_rgba 配对使用）。"""
+    px = im.load()
+    w, h = im.size
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ox = out.load()
+    for yy in range(h):
+        for xx in range(w):
+            pr, pg, pb, pa = px[xx, yy]
+            if pa <= 0:
+                continue
+            s = 255.0 / float(pa)
+            r = min(255, int(pr * s + 0.5))
+            g = min(255, int(pg * s + 0.5))
+            b = min(255, int(pb * s + 0.5))
+            ox[xx, yy] = (r, g, b, pa)
+    return out
+
+
 def _dist2(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
     return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
 
@@ -56,10 +92,13 @@ def render_enhanced_icon(
     th = int(canvas * fill_ratio)
     scale = min(tw / im.width, th / im.height)
     nw, nh = max(1, int(im.width * scale)), max(1, int(im.height * scale))
-    supersample = 2
-    big = im.resize((nw * supersample, nh * supersample), Image.Resampling.LANCZOS)
-    sharp = big.resize((nw, nh), Image.Resampling.LANCZOS)
-    sharp = sharp.filter(ImageFilter.UnsharpMask(radius=1.0, percent=130, threshold=2))
+    supersample = 5
+    pm = _premultiply_rgba(im)
+    big = pm.resize((nw * supersample, nh * supersample), Image.Resampling.LANCZOS)
+    down = getattr(Image.Resampling, "BOX", Image.Resampling.LANCZOS)
+    sharp = big.resize((nw, nh), down)
+    sharp = _demultiply_rgba(sharp)
+    sharp = sharp.filter(ImageFilter.UnsharpMask(radius=0.72, percent=92, threshold=5))
 
     canvas_img = Image.new("RGBA", (canvas, canvas), (*bg_rgb, 255))
     x = (canvas - nw) // 2
@@ -67,7 +106,7 @@ def render_enhanced_icon(
     canvas_img.paste(sharp, (x, y), sharp)
 
     canvas_img = _brighten_foreground(canvas_img, bg_rgb, thr=28, mult=brighten)
-    canvas_img = canvas_img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=110, threshold=1))
+    canvas_img = canvas_img.filter(ImageFilter.UnsharpMask(radius=0.55, percent=58, threshold=3))
     return canvas_img
 
 
@@ -79,8 +118,13 @@ def main() -> None:
     parser.add_argument("--out-ico", type=Path, default=root / "assets" / "icon.ico")
     parser.add_argument("--bundle-png", type=Path, default=root / "src" / "git_gui" / "bundle_data" / "app_icon.png")
     parser.add_argument("--canvas", type=int, default=1024)
-    parser.add_argument("--fill-ratio", type=float, default=0.92, help="字形最大边占画布比例")
-    parser.add_argument("--brighten", type=float, default=1.45, help="前景 RGB 乘子")
+    parser.add_argument("--fill-ratio", type=float, default=0.97, help="字形最大边占画布比例")
+    parser.add_argument(
+        "--brighten",
+        type=float,
+        default=1.08,
+        help="前景 RGB 乘子（合成已为青绿实色时不宜过大，易糊边）",
+    )
     parser.add_argument("--bg-r", type=int, default=11)
     parser.add_argument("--bg-g", type=int, default=18)
     parser.add_argument("--bg-b", type=int, default=32)
