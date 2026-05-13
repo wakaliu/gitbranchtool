@@ -3,8 +3,9 @@
 包含目标分支输入、收藏、一键切线、Stash 选项、Git 控制台按钮和结果显示。
 """
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-                               QCheckBox, QLabel, QGroupBox, QPlainTextEdit)
+                               QCheckBox, QLabel, QGroupBox, QPlainTextEdit, QSizePolicy)
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from pathlib import Path
 from ...config.settings import Settings
 from ..theme import get_icon
@@ -23,6 +24,7 @@ class OperationPanel(QWidget):
         super().__init__(parent)
         self.settings = Settings()
         self._current_target_branch = ""
+        self._last_summary_raw: str = ""
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -85,6 +87,9 @@ class OperationPanel(QWidget):
         result_tools_layout = QHBoxLayout()
         self.result_summary_label = QLabel("等待操作")
         self.result_summary_label.setProperty("role", "secondary")
+        # 单行摘要若含超长路径/URL，会抬高 QLabel 的 minimumSizeHint，横向 QSplitter 为满足最小宽度会改比例。
+        self.result_summary_label.setWordWrap(True)
+        self.result_summary_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         result_tools_layout.addWidget(self.result_summary_label, 1)
         result_tools_layout.addStretch()
         self.btn_clear_result = QPushButton("清")
@@ -144,9 +149,22 @@ class OperationPanel(QWidget):
         self.btn_clear_result.setText("清空")
         self.btn_clear_result.setToolTip("清理执行结果")
 
+    def _summary_display_text(self, summary: str) -> str:
+        """将首行摘要限制在可用宽度内，避免撑开操作台导致分割条比例漂移。"""
+        if not summary.strip():
+            return "等待操作"
+        panel_w = max(self.width(), 0)
+        avail = panel_w - 32 if panel_w > 160 else 420
+        avail = max(int(avail), 200)
+        fm = QFontMetrics(self.result_summary_label.font())
+        return fm.elidedText(summary.strip(), Qt.TextElideMode.ElideRight, avail)
+
     def update_result(self, text: str, is_success: bool = True) -> None:
         summary = text.splitlines()[0].strip() if text else ""
-        self.result_summary_label.setText(summary or "等待操作")
+        self._last_summary_raw = summary
+        raw_summary = summary or "等待操作"
+        self.result_summary_label.setText(self._summary_display_text(raw_summary))
+        self.result_summary_label.setToolTip(raw_summary if summary else "")
         self.result_summary_label.setProperty("role", "success" if is_success else "danger")
         self.result_summary_label.style().unpolish(self.result_summary_label)
         self.result_summary_label.style().polish(self.result_summary_label)
@@ -159,6 +177,8 @@ class OperationPanel(QWidget):
     def clear_result(self) -> None:
         """清空执行结果，避免新旧批次日志混在一起。"""
         self.result_summary_label.setText("等待操作")
+        self.result_summary_label.setToolTip("")
+        self._last_summary_raw = ""
         self.result_summary_label.setProperty("role", "secondary")
         self.result_summary_label.style().unpolish(self.result_summary_label)
         self.result_summary_label.style().polish(self.result_summary_label)
@@ -167,7 +187,10 @@ class OperationPanel(QWidget):
         self.result_label.style().polish(self.result_label)
         self.result_label.clear()
 
-    def reset_switch_button(self) -> None:
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        if self._last_summary_raw:
+            self.result_summary_label.setText(self._summary_display_text(self._last_summary_raw))
         """重置一键切线按钮状态。
 
         在进度对话框收尾后主线程同步调用即可；不再使用 QTimer，避免与对话框
