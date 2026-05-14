@@ -191,10 +191,12 @@ class OperationPanel(QWidget):
         super().resizeEvent(event)
         if self._last_summary_raw:
             self.result_summary_label.setText(self._summary_display_text(self._last_summary_raw))
-        """重置一键切线按钮状态。
 
-        在进度对话框收尾后主线程同步调用即可；不再使用 QTimer，避免与对话框
-        销毁顺序叠加产生额外事件导致不稳定。
+    def reset_switch_button(self) -> None:
+        """恢复「一键切线」可点状态。
+
+        MainWindow 在进度收尾、取消、异常路径都会调用；必须存在且可靠，
+        否则 AttributeError 会在 dispatch_to_main 里被吞掉，按钮会永久保持禁用。
         """
         try:
             self.btn_switch.setEnabled(True)
