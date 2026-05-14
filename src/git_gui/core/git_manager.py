@@ -13,7 +13,7 @@ from ..models.repository import GitRepository
 from ..config.settings import Settings
 from ..utils.file_utils import get_current_branch
 from ..utils.logger import write_error_log
-from ..utils.subprocess_helpers import subprocess_hide_console_kwargs
+from ..utils.subprocess_helpers import subprocess_git_command_kwargs
 
 class GitManager:
     """Git 操作核心。
@@ -39,7 +39,7 @@ class GitManager:
                 text=True,
                 timeout=timeout,
                 check=False,
-                **subprocess_hide_console_kwargs(),
+                **subprocess_git_command_kwargs(),
             )
             if result.returncode != 0:
                 write_error_log("Git命令失败", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}\nstderr={result.stderr[:400]}")
@@ -53,7 +53,7 @@ class GitManager:
                         capture_output=True,
                         text=True,
                         timeout=timeout,
-                        **subprocess_hide_console_kwargs(),
+                        **subprocess_git_command_kwargs(),
                     )
                     write_error_log("Git命令重试完成", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
             write_error_log("Git命令结束", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
@@ -72,9 +72,11 @@ class GitManager:
         """自动解锁 git 进程锁（更激进版，解决并发闪退）。
 
         针对用户反馈的“旧git进程未杀干净”问题：
-        - Windows：直接 taskkill /F /IM git.exe 杀所有git进程（比psutil可靠，避免AccessDenied）
-        - 无论repo匹配，都清理当前repo的lock文件
-        - 每次switch前强制调用，防止并行操作时index.lock竞争
+        - Windows：直接 taskkill /F /IM git.exe 杀所有 git.exe（比 psutil 可靠，避免 AccessDenied）
+        - macOS/Linux：仅结束进程名为 ``git`` 或 ``git-*`` 的进程；不得用子串 ``'git' in name``，
+          否则会误杀本应用（GitPullSwitchTool 等）及名称含 git 的其他程序。
+        - 无论 repo 匹配，都清理当前 repo 的 lock 文件
+        - 每次 switch 前强制调用，防止并行操作时 index.lock 竞争
         这极大提高成功率，尤其多仓库并行场景。
         """
         if not self.settings.get("git.auto_unlock", True):
@@ -100,15 +102,21 @@ class GitManager:
                 except Exception:
                     pass
             else:
-                # 非Windows仍用psutil
-                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                    if proc.info.get('name') and 'git' in proc.info['name'].lower():
-                        try:
-                            proc.kill()
-                            killed = True
-                            time.sleep(0.5)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                            continue
+                # 非 Windows：仅用进程名判断，禁止 ``'git' in name``（会误杀 GitPullSwitchTool、GitHub 等含子串 git 的进程）。
+                def _is_git_worker_process(proc_name: str) -> bool:
+                    n = (proc_name or "").lower()
+                    return n == "git" or n.startswith("git-")
+
+                for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                    pname = proc.info.get("name") or ""
+                    if not _is_git_worker_process(pname):
+                        continue
+                    try:
+                        proc.kill()
+                        killed = True
+                        time.sleep(0.5)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        continue
 
             # 总是清理当前repo的lock文件（后备+主要方案）
             for lock_name in [".git/index.lock", ".git/HEAD.lock", ".git/refs/heads.lock"]:

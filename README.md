@@ -49,11 +49,11 @@ python -m src.git_gui.main
 ```bash
 # macOS（仓库根目录，universal2：M 芯片 + Intel）
 chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
-./scripts/build_macos.sh              # 公开版 + 若存在 sausage_projects.yaml 则再打内部版
-./scripts/build_macos.sh --public-only # 仅公开版（CI 无内部 yaml 时等价）
+./scripts/build_macos.sh              # 公开版 + 内部版（根目录无 yaml 时用 bundle 模板临时复制，与 Windows 双轨一致）
+./scripts/build_macos.sh --public-only # 仅公开版
 ```
 
-内部版需在仓库根放置 `sausage_projects.yaml`（勿提交 Git，见 `.gitignore`），逻辑与 `scripts/build_windows_dual.ps1` 一致。
+内部版默认会再打一份 `GitPullSwitchTool-Sausage`：若仓库根已有 `sausage_projects.yaml`（勿提交 Git，见 `.gitignore`）则打入该文件；否则与 `scripts/build_windows_dual.ps1` 相同，临时复制 `src/git_gui/bundle_data/sausage_projects.yaml` 到根目录参与打包并在结束后删除。
 
 底层 spec 位于 [`packaging/pyinstaller/`](packaging/pyinstaller/)，便于与 `.gitignore` 中的通用 `build/` 临时目录区分。
 

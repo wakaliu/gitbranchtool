@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # macOS 双轨打包（与 Windows build_windows_dual 对齐）：
 # - 公开版：不内置仓库根 sausage_projects.yaml，产物 GitPullSwitchTool.app + GitPullSwitchTool.dmg
-# - 内部版：GITTOOL_SAUSAGE_INTERNAL=1，需仓库根 sausage_projects.yaml，产物 GitPullSwitchTool-Sausage.app + GitPullSwitchTool-Sausage.dmg
+# - 内部版：GITTOOL_SAUSAGE_INTERNAL=1，打入仓库根 sausage_projects.yaml；若根目录无该文件则临时复制
+#   src/git_gui/bundle_data/sausage_projects.yaml 打完即删（与 build_windows_dual.ps1 一致）
 # 均为 universal2（Apple Silicon + Intel）。
-# 可选：--public-only  仅打公开版（CI 无内部 yaml 时常用）
+# 可选：--public-only  仅打公开版
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -101,13 +102,24 @@ if [[ "${PUBLIC_ONLY}" -eq 1 ]]; then
 fi
 
 ROOT_YAML="${ROOT}/sausage_projects.yaml"
+TEMPLATE_YAML="${ROOT}/src/git_gui/bundle_data/sausage_projects.yaml"
+TEMP_INTERNAL_YAML=0
 if [[ ! -f "${ROOT_YAML}" ]]; then
-  echo "未找到 ${ROOT_YAML}，跳过内部版（与 build_windows_dual 行为一致）。" >&2
-  exit 0
+  if [[ ! -f "${TEMPLATE_YAML}" ]]; then
+    echo "未找到 ${ROOT_YAML} 与模板 ${TEMPLATE_YAML}，跳过内部版。" >&2
+    exit 0
+  fi
+  cp -f "${TEMPLATE_YAML}" "${ROOT_YAML}"
+  TEMP_INTERNAL_YAML=1
+  echo "警告: 使用 bundle 模板作为临时 sausage_projects.yaml 打内部版，构建结束后将删除该文件。" >&2
 fi
 
 export GITTOOL_SAUSAGE_INTERNAL=1
 python3 -m PyInstaller --noconfirm --clean --distpath "$DIST_APP" --workpath "${ROOT}/packaging/pyinstaller/work-macos-sausage" "$SPEC"
 unset GITTOOL_SAUSAGE_INTERNAL || true
 "${MAKE_DMG}" "${DIST_APP}/GitPullSwitchTool-Sausage.app" "GitPullSwitchTool-Sausage.dmg" "GitPullSwitchTool-Sausage"
+if [[ "${TEMP_INTERNAL_YAML}" -eq 1 ]]; then
+  rm -f "${ROOT_YAML}"
+  echo "已删除临时 sausage_projects.yaml"
+fi
 echo "内部版: ${DIST_APP}/GitPullSwitchTool-Sausage.app 与 dist/macos-installer/GitPullSwitchTool-Sausage.dmg"
