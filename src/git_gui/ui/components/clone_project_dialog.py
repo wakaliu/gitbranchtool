@@ -41,7 +41,7 @@ from ...utils.runtime_paths import (
     get_repository_root,
     is_pyinstaller_bundle,
 )
-from ...utils.subprocess_helpers import subprocess_hide_console_kwargs
+from ...utils.subprocess_helpers import subprocess_git_command_kwargs, subprocess_hide_console_kwargs
 
 
 class CloneProjectDialog(QDialog):
@@ -170,9 +170,10 @@ class CloneProjectDialog(QDialog):
         self._load_internal_repo_items()
 
     def _bind_runtime_signals(self) -> None:
-        self.log_emitted.connect(self._append_log)
-        self.progress_emitted.connect(self._update_progress)
-        self.batch_finished.connect(self._on_batch_finished)
+        qc = Qt.ConnectionType.QueuedConnection
+        self.log_emitted.connect(self._append_log, qc)
+        self.progress_emitted.connect(self._update_progress, qc)
+        self.batch_finished.connect(self._on_batch_finished, qc)
 
     def apply_language(self, language: str) -> None:
         """应用中英文文案。"""
@@ -347,7 +348,7 @@ class CloneProjectDialog(QDialog):
                 text=True,
                 timeout=12,
                 check=False,
-                **subprocess_hide_console_kwargs(),
+                **subprocess_git_command_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 return candidate
@@ -438,7 +439,7 @@ class CloneProjectDialog(QDialog):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            **subprocess_hide_console_kwargs(),
+            **subprocess_git_command_kwargs(),
         )
         self._active_processes.append(process)
         output_lines: list[str] = []

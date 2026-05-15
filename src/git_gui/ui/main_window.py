@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         self._active_parallel_workers: list[Worker] = []
         self._inactive_project_paths: set[Path] = set()
         self._initial_repo_scan_pending: bool = False
+        self._auto_refresh_busy: bool = False
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(5 * 60 * 1000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_current_project_status)
@@ -288,7 +289,10 @@ class MainWindow(QMainWindow):
     def _show_clone_dialog(self) -> None:
         """弹出克隆工程对话框并执行克隆。"""
         dialog = CloneProjectDialog(self, default_target_dir=self._default_clone_target_dir())
-        dialog.primary_project_ready.connect(self._add_new_project)
+        dialog.primary_project_ready.connect(
+            self._add_new_project,
+            Qt.ConnectionType.QueuedConnection,
+        )
         dialog.exec()
 
     def _default_clone_target_dir(self) -> Path:
@@ -342,10 +346,16 @@ class MainWindow(QMainWindow):
         return bool(self._active_stable_worker or self._active_parallel_workers)
 
     def _auto_refresh_current_project_status(self) -> None:
-        """每 5 分钟自动刷新当前工程仓库状态，跳过不活跃工程。"""
+        """每 5 分钟自动刷新当前工程仓库状态，跳过不活跃工程。
+
+        原先在主线程内对每个仓库连续执行 git，大工程会长时间阻塞事件循环，易与 Qt/PySide
+        定时器、信号槽交织引发 native 崩溃；改为后台 Worker 采集状态后仅在主线程写回 UI。
+        """
         if not self.current_project_path:
             return
         if self._is_git_operation_running():
+            return
+        if self._auto_refresh_busy:
             return
         current_path = self.current_project_path
         if self.project_manager.is_project_inactive(current_path, stale_days=7):
@@ -354,12 +364,61 @@ class MainWindow(QMainWindow):
                 self.logger.append(f"{current_path.name} 已标记为不活跃工程，自动刷新暂停。")
             return
         self._inactive_project_paths.discard(current_path)
-        refreshed = self.project_manager.refresh_project_repo_statuses(current_path)
         project = self.project_manager.get_project_by_path(current_path)
-        if project:
-            self.repo_panel.load_repositories(project.repositories)
+        if not project or not project.repositories:
+            return
+        repo_paths = [r.path for r in project.repositories]
+        self._auto_refresh_busy = True
+
+        def collect_statuses() -> tuple[Path, list[tuple[Path, str, str, int, int]]]:
+            from ..utils.file_utils import get_current_branch, get_sync_status
+
+            rows: list[tuple[Path, str, str, int, int]] = []
+            for rp in repo_paths:
+                branch = get_current_branch(rp)
+                status, ahead_count, behind_count = get_sync_status(rp)
+                rows.append((rp, branch, status, ahead_count, behind_count))
+            return current_path, rows
+
+        worker = Worker(collect_statuses)
+        worker.setAutoDelete(True)
+        worker.signals.finished.connect(self._on_auto_refresh_worker_finished)
+        worker.signals.error.connect(self._on_auto_refresh_worker_failed)
+        self.thread_pool.start(worker)
+
+    def _on_auto_refresh_worker_finished(self, payload: object) -> None:
+        """自动刷新 git 采集完成，在主线程合并到模型并刷新表格。"""
+        self._auto_refresh_busy = False
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        path, rows = payload
+        if path != self.current_project_path:
+            return
+        project = self.project_manager.get_project_by_path(path)
+        if not project:
+            return
+        by_path: dict[str, tuple[Path, str, str, int, int]] = {}
+        for row in rows:
+            rp, branch, status, ahead_count, behind_count = row
+            by_path[str(rp)] = row
+        refreshed = 0
+        for repo in project.repositories:
+            row = by_path.get(str(repo.path))
+            if not row:
+                continue
+            _, branch, status, ahead_count, behind_count = row
+            repo.current_branch = branch
+            repo.status = status
+            repo.ahead_count = ahead_count
+            repo.behind_count = behind_count
+            refreshed += 1
+        self.repo_panel.load_repositories(project.repositories)
         if refreshed > 0:
             self.statusBar().showMessage(f"自动刷新完成：{refreshed} 个仓库")
+
+    def _on_auto_refresh_worker_failed(self, err: str) -> None:
+        self._auto_refresh_busy = False
+        write_error_log("自动刷新后台失败", err[:2000] if err else "")
 
     def _perform_switch(self, target_branch: str, stash: bool) -> None:
         """执行一键切线操作。
@@ -847,5 +906,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """退出时保存状态。"""
+        try:
+            self._auto_refresh_timer.stop()
+        except Exception:
+            pass
         self.logger.append("应用退出")
         event.accept()
