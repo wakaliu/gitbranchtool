@@ -15,8 +15,8 @@ from pathlib import Path
 
 from PIL import Image, ImageFilter
 
-# 前景统一为青绿色（与深蓝底强对比）；RGB 为实色，透明度由原图亮度承担以保留边缘抗锯齿。
-FG_RGB = (52, 199, 172)
+# 前景统一为白色（与纯黑底强对比）；RGB 为实色，透明度由原图亮度承担以保留边缘抗锯齿。
+FG_RGB = (255, 255, 255)
 
 
 def _luma(r: int, g: int, b: int) -> float:
@@ -101,7 +101,7 @@ def _glyph_to_teal_layer(im: Image.Image, bg_dark: bool, fg_margin: float, rgb: 
             strength = max(r, g, b) / 255.0 if bg_dark else (255 - min(r, g, b)) / 255.0
             strength = max(0.0, min(1.0, strength * 1.1 - 0.02))
             # 参考图霓虹外圈多为半透明宽过渡，直接缩放会把过渡带拉成「糊边」；压暗弱通道保留抗锯齿芯部。
-            strength = min(1.0, strength ** 1.42)
+            strength = min(1.0, strength ** 1.28)
             alpha = int(a * strength)
             if alpha < 10:
                 continue
@@ -163,10 +163,10 @@ def _narrow_alpha_fringe(im: Image.Image, *, lo: int = 40, hi: int = 200) -> Ima
     return Image.merge("RGBA", (r, g, b, a2))
 
 
-def _alpha_minfilter(im: Image.Image, size: int = 3) -> Image.Image:
-    """对 alpha 做极小邻域腐蚀，去掉孤立的半透明噪点；仅动 alpha，不改笔画实色。"""
+def _alpha_maxfilter(im: Image.Image, size: int = 3) -> Image.Image:
+    """对 alpha 做极小邻域膨胀，笔画略加粗更饱满；仅动 alpha，不改笔画实色。"""
     r, g, b, a = im.split()
-    a2 = a.filter(ImageFilter.MinFilter(size))
+    a2 = a.filter(ImageFilter.MaxFilter(size))
     return Image.merge("RGBA", (r, g, b, a2))
 
 
@@ -253,9 +253,9 @@ def compose(
     sc = min(inner / patch.width, inner / patch.height)
     nw, nh = max(1, int(round(patch.width * sc))), max(1, int(round(patch.height * sc)))
     fitted = _resize_to_wh(patch, nw, nh, oversample=7)
-    fitted = _narrow_alpha_fringe(fitted, lo=38, hi=212)
-    fitted = _suppress_alpha_spatter(fitted, min_alpha=28)
-    fitted = _alpha_minfilter(fitted, size=3)
+    fitted = _narrow_alpha_fringe(fitted, lo=32, hi=218)
+    fitted = _suppress_alpha_spatter(fitted, min_alpha=24)
+    fitted = _alpha_maxfilter(fitted, size=5)
     canvas_img = Image.new("RGBA", (canvas, canvas), (*bg, 255))
     canvas_img.paste(fitted, ((canvas - nw) // 2, (canvas - nh) // 2), fitted)
     return canvas_img
@@ -270,20 +270,20 @@ def main() -> None:
     p.add_argument(
         "--fill-pad",
         type=int,
-        default=14,
+        default=2,
         help="字形整体距画布边缘留白（像素）；越小越撑满",
     )
-    p.add_argument("--glyph-gap", type=int, default=8, help="两字之间的横向间距（像素）")
+    p.add_argument("--glyph-gap", type=int, default=4, help="两字之间的横向间距（像素）")
     p.add_argument(
         "--left-h-ratio",
         type=float,
         default=0.98,
         help="左字初始高度占画布比例；整体会再缩放撑满，通常取 0.96–0.99",
     )
-    p.add_argument("--right-h-ratio", type=float, default=0.36, help="右字相对左字高度比例")
-    p.add_argument("--bg-r", type=int, default=11)
-    p.add_argument("--bg-g", type=int, default=18)
-    p.add_argument("--bg-b", type=int, default=32)
+    p.add_argument("--right-h-ratio", type=float, default=0.40, help="右字相对左字高度比例")
+    p.add_argument("--bg-r", type=int, default=0)
+    p.add_argument("--bg-g", type=int, default=0)
+    p.add_argument("--bg-b", type=int, default=0)
     p.add_argument("--fg-margin", type=float, default=88.0, help="前景/背景分界亮度阈值")
     args = p.parse_args()
     bg = (args.bg_r, args.bg_g, args.bg_b)
