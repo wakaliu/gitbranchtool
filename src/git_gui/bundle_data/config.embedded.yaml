@@ -1,6 +1,6 @@
 app:
   name: Git 拉线切线工具
-  version: 1.0.2
+  version: 1.0.3
   language: zh
   theme: light
 paths:
@@ -22,6 +22,9 @@ favorites:
     - develop
     - main
     - master
+update:
+  include_prerelease: false
+  github_repo: ""
 github:
   repo: wakaliu/gitbranchtool
   issues_url: https://api.github.com/repos/wakaliu/gitbranchtool/issues

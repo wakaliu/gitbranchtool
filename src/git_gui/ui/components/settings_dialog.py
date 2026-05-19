@@ -72,6 +72,16 @@ class SettingsDialog(QDialog):
         self._gh_group = gh_group
         self._refresh_token_status_ui()
 
+        update_group = QGroupBox("软件更新 / Updates")
+        update_layout = QVBoxLayout(update_group)
+        self.chk_include_prerelease = QCheckBox("包含预发布版本（测试用）")
+        self.chk_include_prerelease.setToolTip(
+            "开启后「检查更新」会对比含 beta/rc 的 Release；正式使用请保持关闭。"
+        )
+        self.chk_include_prerelease.setChecked(bool(self.settings.get("update.include_prerelease", False)))
+        update_layout.addWidget(self.chk_include_prerelease)
+        layout.addWidget(update_group)
+
         # 按钮
         btn_layout = QHBoxLayout()
         self.btn_save = QPushButton("保存并应用")
@@ -145,6 +155,7 @@ class SettingsDialog(QDialog):
 
         self.settings.set("app.language", new_lang)
         self.settings.set("app.theme", new_theme)
+        self.settings.set("update.include_prerelease", self.chk_include_prerelease.isChecked())
 
         self.settings_changed.emit()
         self._refresh_token_status_ui()

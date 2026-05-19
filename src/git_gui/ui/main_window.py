@@ -23,6 +23,8 @@ from .components.project_panel import ProjectPanel
 from .components.repo_list_panel import RepoListPanel
 from .components.operation_panel import OperationPanel
 from .components.feedback_dialog import FeedbackDialog
+from .components.update_dialog import UpdateDialog
+from ..core.update_service import check_for_update
 from .components.settings_dialog import SettingsDialog
 from .components.branch_favorite_dialog import BranchFavoriteDialog
 from .components.git_console_dialog import GitConsoleDialog
@@ -86,6 +88,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("设置", self._show_settings)
 
         help_menu = menubar.addMenu("帮助")
+        help_menu.addAction("检查更新", self._check_for_updates)
         help_menu.addAction("关于", self._show_about)
 
         # 中央部件
@@ -842,6 +845,7 @@ class MainWindow(QMainWindow):
             tools_menu.addAction("Feedback", self._show_feedback)
             tools_menu.addAction("Settings", self._show_settings)
             help_menu = self.menuBar().addMenu("Help")
+            help_menu.addAction("Check for Updates", self._check_for_updates)
             help_menu.addAction("About", self._show_about)
             self.statusBar().showMessage("Ready")
             self.log_title_label.setText("Runtime Logs (auto cleanup, elapsed time shown)")
@@ -854,6 +858,7 @@ class MainWindow(QMainWindow):
             tools_menu.addAction("反馈", self._show_feedback)
             tools_menu.addAction("设置", self._show_settings)
             help_menu = self.menuBar().addMenu("帮助")
+            help_menu.addAction("检查更新", self._check_for_updates)
             help_menu.addAction("关于", self._show_about)
             self.statusBar().showMessage("就绪")
             self.log_title_label.setText("运行日志 (自动清理，显示耗时)")
@@ -863,12 +868,45 @@ class MainWindow(QMainWindow):
         self.operation_panel.apply_language(language)
         self._update_workspace_header()
 
+    def _check_for_updates(self) -> None:
+        """菜单触发：后台请求 GitHub Releases，在主线程展示结果。"""
+        if self.settings.language == "en":
+            self.statusBar().showMessage("Checking for updates…")
+        else:
+            self.statusBar().showMessage("正在检查更新…")
+        worker = Worker(check_for_update)
+        worker.signals.finished.connect(self._on_update_check_finished)
+        worker.signals.error.connect(self._on_update_check_failed)
+        self.thread_pool.start(worker)
+
+    def _on_update_check_finished(self, result) -> None:
+        self._update_workspace_header()
+        UpdateDialog(result, language=self.settings.language, parent=self).exec()
+
+    def _on_update_check_failed(self, message: str) -> None:
+        self._update_workspace_header()
+        if self.settings.language == "en":
+            QMessageBox.warning(self, "Check for Updates", message)
+        else:
+            QMessageBox.warning(self, "检查更新", message)
+
     def _show_about(self) -> None:
         ver = self.settings.get("app.version", APP_VERSION)
+        if self.settings.language == "en":
+            QMessageBox.about(
+                self,
+                "About",
+                f"Git Pull-Switch Tool v{ver}\n\nBatch fetch and branch switch for multi-repo projects.\n"
+                "Windows / macOS (Intel & Apple Silicon).\n\n"
+                "Help → Check for Updates to get the latest installer.",
+            )
+            return
         QMessageBox.about(
             self,
             "关于",
-            f"Git 拉线切线工具 v{ver}\n\n专为多仓库项目设计的批量切分支工具。\n支持 Windows / macOS (Intel & M 芯片)。",
+            f"Git 拉线切线工具 v{ver}\n\n专为多仓库项目设计的批量切分支工具。\n"
+            "支持 Windows / macOS (Intel & M 芯片)。\n\n"
+            "可通过「帮助 → 检查更新」获取最新安装包。",
         )
 
     def _update_workspace_header(self) -> None:
