@@ -31,7 +31,7 @@ from .components.git_console_dialog import GitConsoleDialog
 from .components.clone_project_dialog import CloneProjectDialog
 from .widgets.log_text_edit import LogTextEdit
 from .widgets.progress_dialog import OperationProgressDialog
-from .theme import build_app_stylesheet
+from .theme import build_app_stylesheet, get_icon
 
 class MainWindow(QMainWindow):
     """主应用窗口。
@@ -135,21 +135,29 @@ class MainWindow(QMainWindow):
         log_group = QWidget()
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(0, 0, 0, 0)
-        log_layout.setSpacing(8)
+        log_layout.setSpacing(6)
+        log_header = QHBoxLayout()
+        log_header.setSpacing(8)
         self.log_title_label = QLabel("运行日志 (自动清理，显示耗时)")
         self.log_title_label.setProperty("role", "section-title")
-        log_layout.addWidget(self.log_title_label)
-        self.log_text = LogTextEdit()
-        log_layout.addWidget(self.log_text)
-
-        self.clear_log_btn = QPushButton("清理日志")
+        log_header.addWidget(self.log_title_label, 1)
+        self.clear_log_btn = QPushButton()
         self.clear_log_btn.setProperty("role", "compact")
+        self.clear_log_btn.setIcon(get_icon(self, "clear"))
+        self.clear_log_btn.setFixedHeight(24)
+        self.clear_log_btn.setToolTip("清理日志")
         self.clear_log_btn.clicked.connect(self.logger.clear)
-        log_layout.addWidget(self.clear_log_btn)
+        log_header.addWidget(self.clear_log_btn)
+        log_layout.addLayout(log_header)
+        self.log_text = LogTextEdit()
+        log_layout.addWidget(self.log_text, 1)
 
         log_wrapper_layout.addWidget(log_group)
         main_splitter.addWidget(log_wrapper_group)
-        main_splitter.setSizes([220, 440, 240])
+        main_splitter.setSizes([240, 520, 140])
+        main_splitter.setStretchFactor(0, 2)
+        main_splitter.setStretchFactor(1, 6)
+        main_splitter.setStretchFactor(2, 1)
         main_layout.addWidget(main_splitter)
 
         self.setCentralWidget(central)
@@ -892,7 +900,7 @@ class MainWindow(QMainWindow):
             help_menu.addAction("About", self._show_about)
             self.statusBar().showMessage("Ready")
             self.log_title_label.setText("Runtime Logs (auto cleanup, elapsed time shown)")
-            self.clear_log_btn.setText("Clear Logs")
+            self.clear_log_btn.setToolTip("Clear logs")
         else:
             self.menuBar().clear()
             file_menu = self.menuBar().addMenu("文件")
@@ -905,7 +913,7 @@ class MainWindow(QMainWindow):
             help_menu.addAction("关于", self._show_about)
             self.statusBar().showMessage("就绪")
             self.log_title_label.setText("运行日志 (自动清理，显示耗时)")
-            self.clear_log_btn.setText("清理日志")
+            self.clear_log_btn.setToolTip("清理日志")
         self.project_panel.apply_language(language)
         self.repo_panel.apply_language(language)
         self.operation_panel.apply_language(language)
