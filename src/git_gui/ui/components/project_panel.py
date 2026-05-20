@@ -105,13 +105,18 @@ class ProjectPanel(QWidget):
         self.project_selected.emit(self._selected_project_paths())
 
     def load_projects(self, projects: list[Project]) -> None:
+        """重建工程列表；重建期间阻塞 selection 信号，避免清空时误触发「未选择」。"""
         self.projects = projects
-        self.list_widget.clear()
-        for project in projects:
-            item = QListWidgetItem(project.name)
-            item.setData(Qt.UserRole, str(project.path))
-            item.setToolTip(str(project.path))
-            self.list_widget.addItem(item)
+        self.list_widget.blockSignals(True)
+        try:
+            self.list_widget.clear()
+            for project in projects:
+                item = QListWidgetItem(project.name)
+                item.setData(Qt.UserRole, str(project.path))
+                item.setToolTip(str(project.path))
+                self.list_widget.addItem(item)
+        finally:
+            self.list_widget.blockSignals(False)
         has_data = bool(projects)
         self.empty_hint_label.setVisible(not has_data)
         if not has_data:
@@ -123,22 +128,32 @@ class ProjectPanel(QWidget):
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             if item and item.data(Qt.UserRole) == target:
-                self.list_widget.clearSelection()
-                item.setSelected(True)
-                self.list_widget.setCurrentItem(item)
+                self.list_widget.blockSignals(True)
+                try:
+                    self.list_widget.clearSelection()
+                    item.setSelected(True)
+                    self.list_widget.setCurrentItem(item)
+                finally:
+                    self.list_widget.blockSignals(False)
                 self._sync_selection_hint_from_list()
+                self.project_selected.emit(self._selected_project_paths())
                 return True
         return False
 
     def select_first_project(self) -> None:
         """选中第一个工程（若存在）。"""
         if self.list_widget.count() > 0:
-            self.list_widget.clearSelection()
             first_item = self.list_widget.item(0)
             if first_item:
-                first_item.setSelected(True)
-                self.list_widget.setCurrentItem(first_item)
+                self.list_widget.blockSignals(True)
+                try:
+                    self.list_widget.clearSelection()
+                    first_item.setSelected(True)
+                    self.list_widget.setCurrentItem(first_item)
+                finally:
+                    self.list_widget.blockSignals(False)
                 self._sync_selection_hint_from_list()
+                self.project_selected.emit(self._selected_project_paths())
 
     def _update_selected_project_hint(self, selected_path: str | None) -> None:
         """显示当前选中工程与仓库数，帮助用户快速确认操作上下文。"""
@@ -185,14 +200,16 @@ class ProjectPanel(QWidget):
         if not selected_rows:
             return
         if QMessageBox.question(self, "确认", "确定移除选中的工程吗？") == QMessageBox.Yes:
+            paths_to_remove: list[Path] = []
             for row in selected_rows:
                 item = self.list_widget.item(row)
                 if not item:
                     continue
                 path_str = item.data(Qt.UserRole)
                 if path_str:
-                    self.project_removed.emit(Path(path_str))
-                self.list_widget.takeItem(row)
+                    paths_to_remove.append(Path(path_str))
+            for path in paths_to_remove:
+                self.project_removed.emit(path)
 
     def get_selected_project_paths(self) -> list[Path]:
         return [Path(item.data(Qt.UserRole)) for item in self.list_widget.selectedItems()]

@@ -274,17 +274,33 @@ class MainWindow(QMainWindow):
         """后台扫描完成后更新 UI（必须在主线程）。"""
         if project:
             self.project_panel.load_projects(self.project_manager.projects)
-            if self.project_manager.projects:
-                self._on_project_selected([str(self.project_manager.projects[0].path)])
+            if not self.project_panel.select_project_by_path(project.path):
+                self._on_project_selected([str(project.path)])
             self.logger.end_operation(True, f"已添加工程: {project.name}")
             self.statusBar().showMessage(f"工程 {project.name} 添加成功")
         else:
             self.logger.end_operation(False, "添加失败或已存在")
 
     def _remove_project(self, path: Path) -> None:
-        if self.project_manager.remove_project(path):
-            self.project_panel.load_projects(self.project_manager.projects)
-            self.logger.append(f"已移除工程: {path.name}")
+        if not self.project_manager.remove_project(path):
+            return
+        was_current = self.current_project_path == path
+        self._inactive_project_paths.discard(path)
+        self.project_panel.load_projects(self.project_manager.projects)
+        self.logger.append(f"已移除工程: {path.name}")
+
+        if not was_current:
+            self._update_workspace_header()
+            return
+
+        if self.project_manager.projects:
+            self.project_panel.select_first_project()
+            return
+
+        self.current_project_path = None
+        self.settings.save_last_selected_project("")
+        self.repo_panel.load_repositories([])
+        self._update_workspace_header()
 
     def _show_clone_dialog(self) -> None:
         """弹出克隆工程对话框并执行克隆。"""
@@ -308,16 +324,19 @@ class MainWindow(QMainWindow):
         return Path.home()
 
     def _refresh_all(self) -> None:
-        self.logger.start_operation("刷新仓库状态")
+        self.logger.start_operation("刷新仓库列表")
         if not self.current_project_path:
             self.logger.end_operation(False, "未选择工程")
             return
-        refreshed = self.project_manager.refresh_project_repo_statuses(self.current_project_path)
+        count, removed = self.project_manager.rescan_project(self.current_project_path)
         project = self.project_manager.get_project_by_path(self.current_project_path)
         if project:
             self.repo_panel.load_repositories(project.repositories)
         self._inactive_project_paths.discard(self.current_project_path)
-        self.logger.end_operation(True, f"刷新完成：{refreshed} 个仓库")
+        msg = f"刷新完成：{count} 个仓库"
+        if removed > 0:
+            msg += f"，已移除 {removed} 个无效路径"
+        self.logger.end_operation(True, msg)
         self._update_workspace_header()
 
     def _perform_fetch(self, repo_paths: List[Path]) -> None:
@@ -365,12 +384,20 @@ class MainWindow(QMainWindow):
             return
         self._inactive_project_paths.discard(current_path)
         project = self.project_manager.get_project_by_path(current_path)
-        if not project or not project.repositories:
+        if not project:
+            return
+        removed = self.project_manager.prune_invalid_repositories(project)
+        if removed > 0 and current_path == self.current_project_path:
+            self.repo_panel.load_repositories(project.repositories)
+        if not project.repositories:
+            if removed > 0:
+                self.statusBar().showMessage(f"自动刷新：已移除 {removed} 个无效仓库")
             return
         repo_paths = [r.path for r in project.repositories]
         self._auto_refresh_busy = True
+        pruned_count = removed
 
-        def collect_statuses() -> tuple[Path, list[tuple[Path, str, str, int, int]]]:
+        def collect_statuses() -> tuple[Path, int, list[tuple[Path, str, str, int, int]]]:
             from ..utils.file_utils import get_current_branch, get_sync_status
 
             rows: list[tuple[Path, str, str, int, int]] = []
@@ -378,7 +405,7 @@ class MainWindow(QMainWindow):
                 branch = get_current_branch(rp)
                 status, ahead_count, behind_count = get_sync_status(rp)
                 rows.append((rp, branch, status, ahead_count, behind_count))
-            return current_path, rows
+            return current_path, pruned_count, rows
 
         worker = Worker(collect_statuses)
         worker.setAutoDelete(True)
@@ -389,9 +416,9 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_worker_finished(self, payload: object) -> None:
         """自动刷新 git 采集完成，在主线程合并到模型并刷新表格。"""
         self._auto_refresh_busy = False
-        if not isinstance(payload, tuple) or len(payload) != 2:
+        if not isinstance(payload, tuple) or len(payload) != 3:
             return
-        path, rows = payload
+        path, removed, rows = payload
         if path != self.current_project_path:
             return
         project = self.project_manager.get_project_by_path(path)
@@ -401,6 +428,19 @@ class MainWindow(QMainWindow):
         for row in rows:
             rp, branch, status, ahead_count, behind_count = row
             by_path[str(rp)] = row
+        still_valid = [
+            r
+            for r in project.repositories
+            if r.path.exists() and str(r.path) in by_path
+        ]
+        extra_removed = len(project.repositories) - len(still_valid)
+        if extra_removed > 0:
+            project.repositories = still_valid
+            self.project_manager.settings.save_repo_order(
+                str(project.path),
+                [str(r.path) for r in project.repositories],
+            )
+        removed += extra_removed
         refreshed = 0
         for repo in project.repositories:
             row = by_path.get(str(repo.path))
@@ -413,8 +453,11 @@ class MainWindow(QMainWindow):
             repo.behind_count = behind_count
             refreshed += 1
         self.repo_panel.load_repositories(project.repositories)
-        if refreshed > 0:
-            self.statusBar().showMessage(f"自动刷新完成：{refreshed} 个仓库")
+        if refreshed > 0 or removed > 0:
+            msg = f"自动刷新完成：{refreshed} 个仓库"
+            if removed > 0:
+                msg += f"，已移除 {removed} 个无效路径"
+            self.statusBar().showMessage(msg)
 
     def _on_auto_refresh_worker_failed(self, err: str) -> None:
         self._auto_refresh_busy = False

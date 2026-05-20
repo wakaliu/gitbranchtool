@@ -13,6 +13,7 @@ from ..utils.file_utils import (
     get_current_branch,
     get_sync_status,
     get_last_commit_timestamp,
+    is_git_repository,
 )
 
 class ProjectManager:
@@ -159,11 +160,49 @@ class ProjectManager:
         stale_seconds = stale_days * 24 * 60 * 60
         return (time.time() - latest_commit) > stale_seconds
 
+    def prune_invalid_repositories(self, project: Project) -> int:
+        """移除路径已不存在或不再是 Git 仓库的登记项。
+
+        用户删除磁盘上的仓库目录后，仅刷新 git 状态无法将其从列表去掉；
+        需在重扫或轻量刷新前先剔除失效路径，并同步更新 repo_orders 配置。
+        """
+        before = len(project.repositories)
+        project.repositories = [
+            r
+            for r in project.repositories
+            if r.path.exists() and is_git_repository(r.path)
+        ]
+        removed = before - len(project.repositories)
+        if removed > 0:
+            self.settings.save_repo_order(
+                str(project.path),
+                [str(r.path) for r in project.repositories],
+            )
+        return removed
+
+    def rescan_project(self, project_path: Path) -> tuple[int, int]:
+        """重扫工程目录并重建仓库列表（发现新增、剔除已删目录）。
+
+        Returns:
+            (当前仓库数, 本次移除的失效登记数)。重扫前会先统计将被剔除的旧路径数量。
+        """
+        project = self.get_project_by_path(project_path)
+        if not project:
+            return 0, 0
+        stale_paths = {
+            str(r.path)
+            for r in project.repositories
+            if not r.path.exists() or not is_git_repository(r.path)
+        }
+        self._scan_project(project)
+        return len(project.repositories), len(stale_paths)
+
     def refresh_project_repo_statuses(self, project_path: Path) -> int:
-        """只刷新工程内仓库状态，不重扫目录结构。"""
+        """刷新工程内已有仓库的 Git 状态，并剔除磁盘上已不存在的路径。"""
         project = self.get_project_by_path(project_path)
         if not project:
             return 0
+        self.prune_invalid_repositories(project)
         refreshed = 0
         for repo in project.repositories:
             repo.current_branch = get_current_branch(repo.path)
