@@ -49,7 +49,7 @@ class ProjectPanel(QWidget):
         self.list_widget.setDragDropMode(QListWidget.InternalMove)
         self.list_widget.setSelectionMode(QListWidget.SingleSelection)
         self.list_widget.itemSelectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.list_widget)
+        layout.addWidget(self.list_widget, 1)
         self.empty_hint_label = QLabel("暂无工程，请先点击“添加工程”或“克隆新工程”。")
         self.empty_hint_label.setProperty("role", "secondary")
         self.empty_hint_label.setAlignment(Qt.AlignCenter)
