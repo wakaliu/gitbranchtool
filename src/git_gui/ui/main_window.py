@@ -53,6 +53,9 @@ class MainWindow(QMainWindow):
         self.current_project_path: Path | None = None
         self._active_stable_worker: Worker | None = None
         self._active_parallel_workers: list[Worker] = []
+        self._parallel_op_serial: int = 0
+        self._parallel_active_op_serial: int = 0
+        self._parallel_progress_dialog: OperationProgressDialog | None = None
         self._inactive_project_paths: set[Path] = set()
         self._initial_repo_scan_pending: bool = False
         self._auto_refresh_busy: bool = False
@@ -372,6 +375,42 @@ class MainWindow(QMainWindow):
         """避免自动刷新与手动 Git 操作并发导致状态抖动。"""
         return bool(self._active_stable_worker or self._active_parallel_workers)
 
+    def _invalidate_parallel_workers(self) -> None:
+        """使在途并行任务回调失效，并终止可能仍在运行的 git 子进程。
+
+        取消后若旧 Worker 仍占线程池且回调仍挂到上一轮 state，再次 Fetch 会长期停在 0%。
+        """
+        self._parallel_op_serial += 1
+        self._active_parallel_workers.clear()
+        self._kill_git_processes()
+
+    def _release_parallel_progress_dialog(self, dlg: OperationProgressDialog | None) -> None:
+        """安全释放并行操作进度框，避免 cancel 延迟回调误关新一轮对话框导致闪退。"""
+        if dlg is None:
+            return
+        try:
+            dlg.blockSignals(True)
+        except Exception:
+            pass
+        try:
+            dlg.canceled.disconnect()
+        except Exception:
+            pass
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+        try:
+            dlg.close()
+        except Exception:
+            pass
+        try:
+            dlg.deleteLater()
+        except Exception:
+            pass
+        if self._parallel_progress_dialog is dlg:
+            self._parallel_progress_dialog = None
+
     def _auto_refresh_current_project_status(self) -> None:
         """每 5 分钟自动刷新当前工程仓库状态，跳过不活跃工程。
 
@@ -519,6 +558,12 @@ class MainWindow(QMainWindow):
             return
 
         total = len(repo_paths)
+        self._parallel_op_serial += 1
+        op_serial = self._parallel_op_serial
+        self._parallel_active_op_serial = op_serial
+        if self._active_parallel_workers:
+            self._kill_git_processes()
+        self._release_parallel_progress_dialog(self._parallel_progress_dialog)
         state = {
             "completed": 0,
             "success": 0,
@@ -527,27 +572,35 @@ class MainWindow(QMainWindow):
             "cancelled": False,
             "finalized": False,
             "progress_closed": False,
+            "op_serial": op_serial,
         }
         self._active_parallel_workers = []
 
         self.logger.clear()
         self.logger.start_operation(f"{operation_name} ({total} 个仓库)")
         progress = OperationProgressDialog(self, f"正在执行: {operation_name}")
+        self._parallel_progress_dialog = progress
         progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
         progress.update_progress(0, total, f"准备开始，目标仓库: {total}")
+        progress.open()
         self.operation_panel.btn_switch.setEnabled(False)
 
         def safe_close_parallel_progress() -> None:
             if state.get("progress_closed"):
                 return
             state["progress_closed"] = True
+            if self._parallel_progress_dialog is progress:
+                self._release_parallel_progress_dialog(progress)
+
+        def _update_parallel_progress(completed: int, message: str) -> None:
+            if state.get("progress_closed") or state["cancelled"] or state["finalized"]:
+                return
+            if self._parallel_progress_dialog is not progress:
+                return
             try:
-                progress.blockSignals(True)
-            except Exception:
-                pass
-            try:
-                progress.close()
-            except Exception:
+                progress.update_progress(completed, total, message)
+            except RuntimeError:
                 pass
 
         def finalize() -> None:
@@ -580,8 +633,11 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+        def _is_stale_parallel_callback() -> bool:
+            return state["op_serial"] != self._parallel_op_serial
+
         def on_finished(path: Path, output: str) -> None:
-            if state["cancelled"] or state["finalized"]:
+            if _is_stale_parallel_callback() or state["cancelled"] or state["finalized"]:
                 return
             state["completed"] += 1
             try:
@@ -590,12 +646,10 @@ class MainWindow(QMainWindow):
                 message = f"[{path.name}] 成功"
                 self.logger.append(message)
                 state["results"].append((str(path), True, output))
-                if progress.isVisible():
-                    progress.update_progress(
-                        state["completed"],
-                        total,
-                        f"{state['completed']}/{total} - {path.name}",
-                    )
+                _update_parallel_progress(
+                    state["completed"],
+                    f"{state['completed']}/{total} - {path.name}",
+                )
                 # 只在 finalize 时更新 result_panel 为汇总信息 (避免并行时频繁闪烁)
                 if state["completed"] >= total:
                     finalize()
@@ -606,7 +660,7 @@ class MainWindow(QMainWindow):
                     finalize()
 
         def on_error(path: Path, err: str) -> None:
-            if state["cancelled"] or state["finalized"]:
+            if _is_stale_parallel_callback() or state["cancelled"] or state["finalized"]:
                 return
             state["completed"] += 1
             try:
@@ -614,12 +668,10 @@ class MainWindow(QMainWindow):
                 state["failed"] += 1
                 self.logger.append(f"[{path.name}] 失败: {err.splitlines()[0] if err else '未知错误'}")
                 state["results"].append((str(path), False, err))
-                if progress.isVisible():
-                    progress.update_progress(
-                        state["completed"],
-                        total,
-                        f"{state['completed']}/{total} - {path.name} (失败)",
-                    )
+                _update_parallel_progress(
+                    state["completed"],
+                    f"{state['completed']}/{total} - {path.name} (失败)",
+                )
                 # 只在 finalize 时更新 result_panel 为汇总信息 (避免并行时频繁闪烁)
                 if state["completed"] >= total:
                     finalize()
@@ -629,19 +681,43 @@ class MainWindow(QMainWindow):
                     finalize()
 
         def on_cancel() -> None:
-            """用户点击取消时，立即杀死当前git进程并中断操作。"""
+            """用户点击取消：先终止 git；UI 收尾推迟到下一事件循环，避免 canceled 栈内关窗闪退。"""
+            if state["finalized"] or state.get("progress_closed"):
+                return
+            if self._parallel_progress_dialog is not progress:
+                return
             state["cancelled"] = True
-            self._kill_git_processes()
-            self.logger.append("用户取消操作，正在终止git进程...")
+            state["finalized"] = True
+            self._parallel_op_serial += 1
             self._active_parallel_workers.clear()
-            # 使用robust reset确保按钮可用
-            self.operation_panel.reset_switch_button()
+            self._kill_git_processes()
+            captured_op_serial = op_serial
+
+            def finish_cancel_ui() -> None:
+                if self._parallel_active_op_serial != captured_op_serial:
+                    self.operation_panel.reset_switch_button()
+                    return
+                if state.get("progress_closed"):
+                    self.operation_panel.reset_switch_button()
+                    return
+                if self._parallel_progress_dialog is not progress:
+                    self.operation_panel.reset_switch_button()
+                    return
+                try:
+                    self.logger.append("用户取消操作，正在终止 git 进程...")
+                    self.logger.end_operation(False, "用户已取消")
+                except Exception:
+                    pass
+                safe_close_parallel_progress()
+                self.operation_panel.reset_switch_button()
+
+            QTimer.singleShot(0, finish_cancel_ui)
+
         progress.canceled.connect(on_cancel)
 
         for path in repo_paths:
             # 通过线程池限制并发，避免高负载卡顿
             worker = Worker(lambda p=path: per_repo_fn(p))
-            worker.setAutoDelete(False)
             worker.signals.finished.connect(
                 lambda output, p=path: self.dispatch_to_main.emit(
                     lambda: on_finished(p, output)
