@@ -70,7 +70,11 @@ class Settings:
                 "token": "",
                 "issue_labels": [],
                 "feedback_issues_web_url": "https://github.com/wakaliu/gitbranchtool/issues/new",
-            }
+            },
+            "update": {
+                "check_on_startup": True,
+                "auto_dismissed_version": "",
+            },
         }
 
         config_path = get_config_file_path()

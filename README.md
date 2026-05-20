@@ -27,7 +27,7 @@ python -m src.git_gui.main
 
 | 平台 | 便携形态 | 安装包 |
 |------|-----------|--------|
-| Windows | `dist/GitPullSwitchTool.exe`（onefile） | `dist/windows-installer/GitPullSwitchTool-Setup-*.exe`（Inno Setup） |
+| Windows | `dist/GitPullSwitchTool.exe`（onefile） | `dist/windows-installer/GitPullSwitchTool-Setup-*.exe`；内部版另有 `GitPullSwitchTool-Sausage-Setup-*.exe` |
 | macOS（公开） | `dist/macos-portable/GitPullSwitchTool.app` | `dist/macos-installer/GitPullSwitchTool.dmg` |
 | macOS（内部） | `dist/macos-portable/GitPullSwitchTool-Sausage.app` | `dist/macos-installer/GitPullSwitchTool-Sausage.dmg` |
 
@@ -42,9 +42,14 @@ python -m src.git_gui.main
 依赖：`pip install -r requirements.txt pyinstaller`；Windows 安装包另需 [Inno Setup 6](https://jrsoftware.org/isinfo.php)。
 
 ```powershell
-# Windows（仓库根目录）
+# Windows（仓库根目录）：便携 exe + zip + Inno 安装包
 .\scripts\build_windows.ps1
+
+# 公开版 + 香肠内部版（各含便携 zip 与 Setup-*.exe）
+.\scripts\build_windows_dual.ps1
 ```
+
+安装包输出：`dist/windows-installer/GitPullSwitchTool-Setup-*.exe`、`GitPullSwitchTool-Sausage-Setup-*.exe`（需本机 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 或 `winget install JRSoftware.InnoSetup`）。
 
 ```bash
 # macOS（仓库根目录，universal2：M 芯片 + Intel）
@@ -53,7 +58,7 @@ chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
 ./scripts/build_macos.sh --public-only # 仅公开版
 ```
 
-内部版默认会再打一份 `GitPullSwitchTool-Sausage`：若仓库根已有 `sausage_projects.yaml`（勿提交 Git，见 `.gitignore`）则打入该文件；否则与 `scripts/build_windows_dual.ps1` 相同，临时复制 `src/git_gui/bundle_data/sausage_projects.yaml` 到根目录参与打包并在结束后删除。
+内部版默认会再打一份 `GitPullSwitchTool-Sausage`（含对应 Inno Setup）：若仓库根已有 `sausage_projects.yaml`（勿提交 Git，见 `.gitignore`）则打入该文件；否则与 `scripts/build_windows_dual.ps1` 相同，临时复制 `src/git_gui/bundle_data/sausage_projects.yaml` 到根目录参与打包并在结束后删除。
 
 底层 spec 位于 [`packaging/pyinstaller/`](packaging/pyinstaller/)，便于与 `.gitignore` 中的通用 `build/` 临时目录区分。
 
@@ -61,12 +66,24 @@ chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
 
 推送 `v*` 标签或手动触发 **Build release** 工作流后，在 Actions 产物中下载 `windows-packages` / `macos-packages` 压缩包。
 
+### 应用内更新（打包版）
+
+- **帮助 → 检查更新**：从 GitHub Releases 拉取版本列表，若存在比当前版本新且带对应安装包的 Release，可下载并退出后安装。
+- **启动自动检查**（默认开启，可在 `config.yaml` 的 `update.check_on_startup` 关闭）：同一新版本仅自动提示一次；点「暂不更新」后写入 `update.auto_dismissed_version`，该版本下次启动不再弹窗。
+- **Release 资产命名**（须与渠道、平台一致，否则不会提示更新）：
+  - 公开版 Windows：`GitPullSwitchTool-Setup-{版本号}.exe`（版本号无 `v` 前缀，如 `1.0.3`）
+  - 香肠内部版 Windows：`GitPullSwitchTool-Sausage-Setup-{版本号}.exe`
+  - 公开版 macOS：`GitPullSwitchTool.dmg`
+  - 香肠内部版 macOS：`GitPullSwitchTool-Sausage.dmg`
+- macOS 未签名 DMG 更新后若被 Gatekeeper 拦截，请在「隐私与安全性」中放行；配置 GitHub Token 可提高 API 检查频率。
+
 ### 最小验收清单
 
 1. 在未安装 Python 的机器上双击便携 exe 或安装后启动，主窗口可打开。
 2. 主题切换、语言切换无报错。
 3. 对任一本地 Git 仓库执行 Fetch / Switch 类操作可完成；日志区有输出。
 4. 关闭应用后，用户目录下 `config.yaml` 已生成且再次启动设置保留。
+5. （打包版）帮助 → 检查更新可正常请求 GitHub；有新版且 Release 含对应资产时可进入下载流程（可不真装完，仅验证弹窗与进度）。
 
 ## 项目结构
 

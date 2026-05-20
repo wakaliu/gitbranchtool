@@ -27,6 +27,8 @@ from .components.settings_dialog import SettingsDialog
 from .components.branch_favorite_dialog import BranchFavoriteDialog
 from .components.git_console_dialog import GitConsoleDialog
 from .components.clone_project_dialog import CloneProjectDialog
+from ..core.update.update_controller import UpdateController
+from ..ui.i18n.update_texts import get_update_texts
 from .widgets.log_text_edit import LogTextEdit
 from .widgets.progress_dialog import OperationProgressDialog
 from .theme import build_app_stylesheet, get_icon
@@ -62,6 +64,8 @@ class MainWindow(QMainWindow):
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(5 * 60 * 1000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_current_project_status)
+        self._update_controller = UpdateController(self, self._schedule_on_main_thread)
+        self._action_check_update = None
 
         self._setup_ui()
         self._connect_signals()
@@ -74,6 +78,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._run_startup_project_scan)
         QTimer.singleShot(1, self._apply_settings_to_ui)
         self._auto_refresh_timer.start()
+        self._update_controller.schedule_startup_check()
 
         self.setWindowTitle(f"{self.settings.get('app.name')} v{self.settings.get('app.version')}")
         self.resize(1400, 900)
@@ -89,6 +94,10 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("设置", self._show_settings)
 
         help_menu = menubar.addMenu("帮助")
+        self._action_check_update = help_menu.addAction(
+            get_update_texts(self.settings.language).menu_check_updates,
+            lambda: self._update_controller.run_check(auto=False),
+        )
         help_menu.addAction("关于", self._show_about)
 
         # 中央部件
@@ -922,6 +931,10 @@ class MainWindow(QMainWindow):
             write_error_log("取消杀进程异常", str(e))
             self.logger.append("取消操作完成（进程终止可能不完全）")
 
+    def _schedule_on_main_thread(self, fn) -> None:
+        """将任意可调用对象安全调度到主线程执行（供 UpdateController 等使用）。"""
+        self.dispatch_to_main.emit(fn)
+
     def _execute_in_main_thread(self, fn) -> None:
         """将任意可调用对象安全调度到主线程执行。"""
         try:
@@ -953,6 +966,7 @@ class MainWindow(QMainWindow):
         """按当前配置统一应用主题与语言。"""
         self._apply_theme()
         self._apply_language()
+        self._update_controller.on_language_changed()
 
     def _apply_theme(self) -> None:
         """应用浅色/深色主题，确保重启后立即读取到用户设置。"""
@@ -969,6 +983,10 @@ class MainWindow(QMainWindow):
             tools_menu.addAction("Feedback", self._show_feedback)
             tools_menu.addAction("Settings", self._show_settings)
             help_menu = self.menuBar().addMenu("Help")
+            self._action_check_update = help_menu.addAction(
+                get_update_texts("en").menu_check_updates,
+                lambda: self._update_controller.run_check(auto=False),
+            )
             help_menu.addAction("About", self._show_about)
             self.statusBar().showMessage("Ready")
             self.log_title_label.setText("Runtime Logs (auto cleanup, elapsed time shown)")
@@ -981,6 +999,10 @@ class MainWindow(QMainWindow):
             tools_menu.addAction("反馈", self._show_feedback)
             tools_menu.addAction("设置", self._show_settings)
             help_menu = self.menuBar().addMenu("帮助")
+            self._action_check_update = help_menu.addAction(
+                get_update_texts("zh").menu_check_updates,
+                lambda: self._update_controller.run_check(auto=False),
+            )
             help_menu.addAction("关于", self._show_about)
             self.statusBar().showMessage("就绪")
             self.log_title_label.setText("运行日志 (自动清理，显示耗时)")

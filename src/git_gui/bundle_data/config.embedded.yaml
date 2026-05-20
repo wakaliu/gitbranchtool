@@ -28,3 +28,6 @@ github:
   token: ''
   issue_labels: []
   feedback_issues_web_url: https://github.com/wakaliu/gitbranchtool/issues/new
+update:
+  check_on_startup: true
+  auto_dismissed_version: ''
