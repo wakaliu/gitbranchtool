@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QTextEdit,
     QPushButton,
+    QSizePolicy,
 )
 
 from ...config.constants import APP_VERSION
@@ -29,6 +30,8 @@ class UpdateDialogResult(Enum):
 class UpdateDialog(QDialog):
     """展示版本信息与 Release 说明，供自动/手动检查共用。"""
 
+    _BUTTON_MIN_WIDTH = 128
+
     def __init__(
         self,
         offer: UpdateOffer,
@@ -47,7 +50,6 @@ class UpdateDialog(QDialog):
         self._notes_edit: QTextEdit | None = None
         self._btn_update: QPushButton | None = None
         self._btn_later: QPushButton | None = None
-        self._btn_close: QPushButton | None = None
         self.setMinimumWidth(480)
         self._setup_ui()
         self.apply_language(Settings().language)
@@ -74,20 +76,19 @@ class UpdateDialog(QDialog):
         layout.addWidget(self._notes_edit)
 
         btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
         self._btn_update = QPushButton(self)
-        self._btn_update.setProperty("role", "primary")
         self._btn_update.clicked.connect(self._on_update)
-        btn_row.addWidget(self._btn_update)
+        self._btn_update.setMinimumWidth(self._BUTTON_MIN_WIDTH)
+        self._btn_update.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn_row.addWidget(self._btn_update, 1)
 
         self._btn_later = QPushButton(self)
         self._btn_later.clicked.connect(self._on_later)
-        btn_row.addWidget(self._btn_later)
-
-        self._btn_close = QPushButton(self)
-        self._btn_close.clicked.connect(self._on_close)
-        btn_row.addWidget(self._btn_close)
-
-        btn_row.addStretch()
+        self._btn_later.setMinimumWidth(self._BUTTON_MIN_WIDTH)
+        self._btn_later.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn_row.addWidget(self._btn_later, 1)
+        btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
     def apply_language(self, language: str) -> None:
@@ -108,8 +109,6 @@ class UpdateDialog(QDialog):
         if self._btn_later:
             self._btn_later.setText(t.btn_later)
             self._btn_later.setVisible(self._auto_mode)
-        if self._btn_close:
-            self._btn_close.setText(t.btn_close)
 
     def _on_update(self) -> None:
         self._result = UpdateDialogResult.UPDATE_NOW
@@ -119,9 +118,10 @@ class UpdateDialog(QDialog):
         self._result = UpdateDialogResult.DISMISS
         self.reject()
 
-    def _on_close(self) -> None:
+    def reject(self) -> None:
+        """标题栏 X：视为关闭，不写 dismissed。"""
         self._result = UpdateDialogResult.CLOSE
-        self.reject()
+        super().reject()
 
     @property
     def user_result(self) -> UpdateDialogResult:

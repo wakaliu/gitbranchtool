@@ -64,7 +64,12 @@ class MainWindow(QMainWindow):
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(5 * 60 * 1000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_current_project_status)
-        self._update_controller = UpdateController(self, self._schedule_on_main_thread)
+        self._update_flow_locked = False
+        self._update_controller = UpdateController(
+            self,
+            self._schedule_on_main_thread,
+            log_fn=self.logger.append,
+        )
         self._action_check_update = None
 
         self._setup_ui()
@@ -931,6 +936,16 @@ class MainWindow(QMainWindow):
             write_error_log("取消杀进程异常", str(e))
             self.logger.append("取消操作完成（进程终止可能不完全）")
 
+    def set_update_flow_locked(self, locked: bool) -> None:
+        """更新下载/安装期间禁用业务操作，保留窗口最小化/最大化/关闭。"""
+        self._update_flow_locked = locked
+        central = self.centralWidget()
+        if central:
+            central.setEnabled(not locked)
+        self.menuBar().setEnabled(not locked)
+        if hasattr(self, "_action_check_update") and self._action_check_update:
+            self._action_check_update.setEnabled(not locked)
+
     def _schedule_on_main_thread(self, fn) -> None:
         """将任意可调用对象安全调度到主线程执行（供 UpdateController 等使用）。"""
         self.dispatch_to_main.emit(fn)
@@ -1054,7 +1069,9 @@ class MainWindow(QMainWindow):
             self.log_text.append_log(text)
 
     def closeEvent(self, event) -> None:
-        """退出时保存状态。"""
+        """退出时保存状态；更新流程中会先取消后台下载。"""
+        if self._update_controller.is_flow_active():
+            self._update_controller.cancel_flow()
         try:
             self._auto_refresh_timer.stop()
         except Exception:

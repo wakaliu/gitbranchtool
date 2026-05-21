@@ -4,7 +4,7 @@
 
 专为 Unity/大型项目多仓库场景设计，支持 Windows 和 macOS (Intel & Apple Silicon)。
 
-## 特性 (v1.0.1)
+## 特性 (v1.0.2)
 
 - 工程级管理：添加多个项目目录，自动扫描所有 Git 仓库
 - 仓库列表：支持多选、拖拽排序、批量操作
@@ -70,6 +70,7 @@ chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
 
 - **帮助 → 检查更新**：从 GitHub Releases 拉取版本列表，若存在比当前版本新且带对应安装包的 Release，可下载并退出后安装。
 - **启动自动检查**（默认开启，可在 `config.yaml` 的 `update.check_on_startup` 关闭）：同一新版本仅自动提示一次；点「暂不更新」后写入 `update.auto_dismissed_version`，该版本下次启动不再弹窗。
+- **API 节流**：`update.startup_check_cooldown_minutes`（默认 30）内重复启动不再次请求；命中 GitHub 限流后写入 `update.rate_limit_backoff_until`，退避期内手动/自动检查均不再访问 API（手动检查会提示剩余等待时间）。
 - **Release 资产命名**（须与渠道、平台一致，否则不会提示更新）：
   - 公开版 Windows：`GitPullSwitchTool-Setup-{版本号}.exe`（版本号无 `v` 前缀，如 `1.0.3`）
   - 香肠内部版 Windows：`GitPullSwitchTool-Sausage-Setup-{版本号}.exe`

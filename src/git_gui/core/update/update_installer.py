@@ -11,10 +11,14 @@ from typing import Callable, Optional
 import requests
 from requests.exceptions import RequestException
 
+from ...config.constants import APP_VERSION
 from ...utils.build_channel import is_sausage_build
 from ...utils.runtime_paths import get_user_data_dir
 from ...utils.subprocess_helpers import subprocess_hide_console_kwargs
 from .release_checker import UpdateOffer
+
+_DOWNLOAD_CONNECT_TIMEOUT = 30
+_DOWNLOAD_READ_TIMEOUT = 300
 
 def get_updates_dir() -> Path:
     """用户目录下存放更新包与脚本的文件夹。"""
@@ -23,9 +27,14 @@ def get_updates_dir() -> Path:
     return path
 
 
+class UpdateDownloadCancelled(Exception):
+    """用户取消下载。"""
+
+
 def download_update(
     offer: UpdateOffer,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Path:
     """流式下载 Release 资产到本地。
 
@@ -46,24 +55,79 @@ def download_update(
 
     from ...utils.github_issue import GitHubIssueReporter
 
-    headers = {"Accept": "application/octet-stream"}
+    headers = {
+        "Accept": "application/octet-stream",
+        "User-Agent": f"GitPullSwitchTool-Update/{APP_VERSION}",
+    }
     token = GitHubIssueReporter()._effective_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    with requests.get(offer.download_url, headers=headers, stream=True, timeout=120) as resp:
+    if on_progress:
+        on_progress(0, int(offer.asset_size or 0))
+
+    with requests.get(
+        offer.download_url,
+        headers=headers,
+        stream=True,
+        timeout=(_DOWNLOAD_CONNECT_TIMEOUT, _DOWNLOAD_READ_TIMEOUT),
+        allow_redirects=True,
+    ) as resp:
         resp.raise_for_status()
         total = int(resp.headers.get("Content-Length") or offer.asset_size or 0)
+        if on_progress:
+            on_progress(0, total)
         downloaded = 0
-        with open(dest, "wb") as out:
-            for chunk in resp.iter_content(chunk_size=256 * 1024):
-                if not chunk:
-                    continue
-                out.write(chunk)
-                downloaded += len(chunk)
-                if on_progress:
-                    on_progress(downloaded, total)
+        try:
+            with open(dest, "wb") as out:
+                for chunk in resp.iter_content(chunk_size=256 * 1024):
+                    if should_cancel and should_cancel():
+                        raise UpdateDownloadCancelled("用户已取消下载")
+                    if not chunk:
+                        continue
+                    out.write(chunk)
+                    downloaded += len(chunk)
+                    if on_progress:
+                        on_progress(downloaded, total)
+        except UpdateDownloadCancelled:
+            if dest.exists():
+                dest.unlink()
+            raise
     return dest
+
+
+def windows_installed_exe_path() -> Path:
+    """Inno 默认安装目录下的主程序路径（与 ``*.iss`` 中 DefaultDirName 一致）。"""
+    program_files = Path(
+        os.environ.get("ProgramFiles") or r"C:\Program Files"
+    )
+    if is_sausage_build():
+        return program_files / "GitPullSwitchTool-Sausage" / "GitPullSwitchTool-Sausage.exe"
+    return program_files / "GitPullSwitchTool" / "GitPullSwitchTool.exe"
+
+
+def _write_windows_setup_bat(
+    bat_path: Path,
+    pid: int,
+    setup_exe: Path,
+    launch_exe: Path,
+) -> None:
+    """等待主进程退出后静默安装，并在完成后启动已安装目录中的 exe。"""
+    setup = str(setup_exe.resolve())
+    launch = str(launch_exe.resolve())
+    content = f"""@echo off
+:wait_loop
+tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto wait_loop
+)
+start "" /wait "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /NORESTARTAPPLICATIONS
+if exist "{launch}" (
+    start "" "{launch}"
+)
+"""
+    bat_path.write_text(content, encoding="utf-8")
 
 
 def _write_windows_portable_bat(
@@ -137,13 +201,16 @@ def launch_apply_after_quit(package_path: Path) -> None:
 
     if sys.platform == "win32":
         if package_path.suffix.lower() == ".exe":
+            bat = get_updates_dir() / "apply_update_setup.bat"
+            _write_windows_setup_bat(
+                bat,
+                pid,
+                package_path,
+                windows_installed_exe_path(),
+            )
             subprocess.Popen(
-                [
-                    str(package_path),
-                    "/VERYSILENT",
-                    "/SUPPRESSMSGBOXES",
-                    "/CLOSEAPPLICATIONS",
-                ],
+                ["cmd", "/c", str(bat)],
+                cwd=str(get_updates_dir()),
                 **hide,
             )
             return

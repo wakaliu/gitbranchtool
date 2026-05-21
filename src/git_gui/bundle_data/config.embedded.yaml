@@ -30,4 +30,9 @@ github:
   feedback_issues_web_url: https://github.com/wakaliu/gitbranchtool/issues/new
 update:
   check_on_startup: true
+  startup_check_cooldown_minutes: 30
+  rate_limit_fallback_minutes: 60
+  last_auto_check_at: 0
+  last_check_at: 0
+  rate_limit_backoff_until: 0
   auto_dismissed_version: ''

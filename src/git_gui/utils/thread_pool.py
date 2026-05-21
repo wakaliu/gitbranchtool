@@ -12,7 +12,7 @@ class WorkerSignals(QObject):
     """线程信号，用于安全地将结果/错误传回主线程。"""
     finished = Signal(object)   # 成功结果
     error = Signal(str)         # 错误信息
-    progress = Signal(str)      # 实时进度/日志
+    progress = Signal(object)   # 实时进度（如字节元组）或日志字符串
 
 class Worker(QRunnable):
     """可重用工作线程。

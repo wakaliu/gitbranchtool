@@ -1,6 +1,6 @@
 """设置对话框。
 
-支持切换语言 (中/英) 和主题 (浅色/深色)，以及 GitHub Token 的钥匙串保存。
+支持切换语言 (中/英) 和主题 (浅色/深色)，GitHub Token、更新检查与 API 配额展示。
 """
 import os
 
@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCombo
 from PySide6.QtCore import Signal
 from ...config.settings import Settings
 from ...utils import credential_store
+from ...utils.github_rate_limit import fetch_github_rate_limit_safe
+from ...utils.thread_pool import ThreadPoolManager, Worker
 
 class SettingsDialog(QDialog):
     """设置对话框。
@@ -21,7 +23,10 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("设置")
         self.settings = Settings()
+        self._thread_pool = ThreadPoolManager()
+        self._rate_limit_busy = False
         self._setup_ui()
+        self._refresh_rate_limit_async()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -48,7 +53,19 @@ class SettingsDialog(QDialog):
         theme_layout.addWidget(self.theme_combo)
         layout.addWidget(theme_group)
 
-        gh_group = QGroupBox("GitHub 反馈 (Issues)")
+        update_group = QGroupBox("应用更新")
+        update_layout = QVBoxLayout(update_group)
+        self.chk_check_on_startup = QCheckBox("启动时自动检查更新（仅打包版 exe）")
+        self.chk_check_on_startup.setChecked(
+            bool(self.settings.get("update.check_on_startup", True))
+        )
+        self.chk_check_on_startup.setToolTip(
+            "关闭后不会在启动约 2 秒时访问 GitHub；仍可通过「帮助 → 检查更新」手动检查。"
+        )
+        update_layout.addWidget(self.chk_check_on_startup)
+        layout.addWidget(update_group)
+
+        gh_group = QGroupBox("GitHub（反馈与检查更新）")
         gh_layout = QVBoxLayout(gh_group)
         self.lbl_token_status = QLabel()
         self.lbl_token_status.setWordWrap(True)
@@ -68,6 +85,16 @@ class SettingsDialog(QDialog):
         row_gh_btn.addWidget(self.btn_clear_token)
         row_gh_btn.addStretch()
         gh_layout.addLayout(row_gh_btn)
+        self.lbl_rate_limit = QLabel("GitHub API 配额：正在查询…")
+        self.lbl_rate_limit.setWordWrap(True)
+        self.lbl_rate_limit.setProperty("role", "secondary")
+        gh_layout.addWidget(self.lbl_rate_limit)
+        row_rate = QHBoxLayout()
+        self.btn_refresh_rate = QPushButton("刷新 API 剩余次数")
+        self.btn_refresh_rate.clicked.connect(self._refresh_rate_limit_async)
+        row_rate.addWidget(self.btn_refresh_rate)
+        row_rate.addStretch()
+        gh_layout.addLayout(row_rate)
         layout.addWidget(gh_group)
         self._gh_group = gh_group
         self._refresh_token_status_ui()
@@ -99,7 +126,10 @@ class SettingsDialog(QDialog):
         ).strip():
             self.lbl_token_status.setText("当前状态：将使用环境变量中的 Token。")
         else:
-            self.lbl_token_status.setText("当前状态：未检测到已保存的 Token。")
+            self.lbl_token_status.setText(
+                "当前状态：未配置 Token。公开仓库的检查更新与 Issue 反馈均可正常使用；"
+                "配置 Token 可提高 GitHub API 限额，减少「访问过于频繁」提示。"
+            )
 
         kr_ok = credential_store.is_keyring_available()
         self.chk_keyring.setEnabled(kr_ok)
@@ -145,8 +175,50 @@ class SettingsDialog(QDialog):
 
         self.settings.set("app.language", new_lang)
         self.settings.set("app.theme", new_theme)
+        self.settings.set("update.check_on_startup", self.chk_check_on_startup.isChecked())
 
         self.settings_changed.emit()
+        self._refresh_rate_limit_async()
         self._refresh_token_status_ui()
         QMessageBox.information(self, "成功", "设置已保存，重启后部分更改生效。")
         self.accept()
+
+    def _current_language(self) -> str:
+        return "en" if self.lang_combo.currentIndex() == 1 else "zh"
+
+    def _refresh_rate_limit_async(self) -> None:
+        """后台查询 ``/rate_limit``（该请求本身不消耗 core 配额）。"""
+        if self._rate_limit_busy:
+            return
+        self._rate_limit_busy = True
+        self.btn_refresh_rate.setEnabled(False)
+        loading = (
+            "GitHub API 配额：正在查询…"
+            if self._current_language() == "zh"
+            else "GitHub API quota: loading…"
+        )
+        self.lbl_rate_limit.setText(loading)
+
+        lang = self._current_language()
+        worker = Worker(fetch_github_rate_limit_safe, lang)
+        worker.signals.finished.connect(self._on_rate_limit_loaded)
+        worker.signals.error.connect(self._on_rate_limit_worker_error)
+        self._thread_pool.start(worker)
+
+    def _on_rate_limit_loaded(self, result: tuple) -> None:
+        self._rate_limit_busy = False
+        self.btn_refresh_rate.setEnabled(True)
+        line, err = result
+        lang = self._current_language()
+        if err:
+            prefix = "GitHub API 配额：" if lang == "zh" else "GitHub API quota: "
+            self.lbl_rate_limit.setText(f"{prefix}无法获取（{err}）")
+            return
+        self.lbl_rate_limit.setText(line or "")
+
+    def _on_rate_limit_worker_error(self, err: str) -> None:
+        self._rate_limit_busy = False
+        self.btn_refresh_rate.setEnabled(True)
+        lang = self._current_language()
+        prefix = "GitHub API 配额：" if lang == "zh" else "GitHub API quota: "
+        self.lbl_rate_limit.setText(f"{prefix}查询失败")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 import requests
@@ -14,7 +15,11 @@ from ...config.constants import APP_VERSION
 from ...config.settings import Settings
 from ...utils.build_channel import is_sausage_build
 from ...utils.github_issue import GitHubIssueReporter
+from .check_messages import UpdateCheckFailureText, format_update_check_failure
+from ...utils.github_repo_config import is_valid_github_repo
 from ...utils.logger import write_error_log
+from .update_errors import UpdateCheckError
+from .update_throttle import clear_rate_limit_backoff, record_rate_limit_backoff
 
 _TAG_VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)", re.IGNORECASE)
 
@@ -70,11 +75,56 @@ def _github_headers() -> dict[str, str]:
     return headers
 
 
+def _rate_limit_reset_hint(reset_header: Optional[str]) -> str:
+    """将 ``X-RateLimit-Reset`` 转为本地时间提示，解析失败时返回空串。"""
+    if not reset_header:
+        return ""
+    try:
+        reset_at = datetime.fromtimestamp(int(reset_header))
+        return reset_at.strftime("%H:%M")
+    except (ValueError, OSError):
+        return ""
+
+
+def _raise_github_api_error(resp: requests.Response, repo: str) -> None:
+    """将 GitHub REST 错误转为 ``UpdateCheckError``。"""
+    if resp.status_code == 404:
+        raise UpdateCheckError("repo_not_found", repo=repo)
+    if resp.status_code == 401:
+        raise UpdateCheckError("token_invalid")
+    if resp.status_code != 403:
+        resp.raise_for_status()
+        return
+
+    body: dict[str, Any] = {}
+    try:
+        parsed = resp.json()
+        if isinstance(parsed, dict):
+            body = parsed
+    except ValueError:
+        pass
+    api_msg = str(body.get("message") or "").lower()
+    remaining = resp.headers.get("X-RateLimit-Remaining")
+    if "rate limit" in api_msg or remaining == "0":
+        reset_header = resp.headers.get("X-RateLimit-Reset")
+        reset_unix = 0
+        try:
+            reset_unix = int(reset_header) if reset_header else 0
+        except (ValueError, TypeError):
+            reset_unix = 0
+        raise UpdateCheckError(
+            "rate_limit",
+            reset_time=_rate_limit_reset_hint(reset_header),
+            reset_unix=reset_unix,
+        )
+    raise UpdateCheckError("repo_forbidden", repo=repo)
+
+
 def _fetch_releases(repo: str) -> list[dict[str, Any]]:
     """分页拉取仓库 Releases（跳过 draft）。"""
-    if not repo or "/" not in repo:
-        raise ValueError("github.repo 配置无效")
-    owner, name = repo.split("/", 1)
+    if not is_valid_github_repo(repo):
+        raise UpdateCheckError("invalid_repo_config")
+    owner, name = repo.strip().split("/", 1)
     url = f"https://api.github.com/repos/{owner}/{name}/releases"
     headers = _github_headers()
     all_releases: list[dict[str, Any]] = []
@@ -86,10 +136,8 @@ def _fetch_releases(repo: str) -> list[dict[str, Any]]:
             params={"per_page": 100, "page": page},
             timeout=30,
         )
-        if resp.status_code == 403:
-            raise RequestException(
-                "GitHub API 限流或无权访问，可在设置中配置 Token 后重试。"
-            )
+        if resp.status_code in (401, 403, 404):
+            _raise_github_api_error(resp, repo)
         resp.raise_for_status()
         batch = resp.json()
         if not batch:
@@ -128,10 +176,10 @@ def check_for_update(current_version: Optional[str] = None) -> Optional[UpdateOf
     try:
         current_ver = Version(cur_str.lstrip("vV"))
     except InvalidVersion as exc:
-        raise ValueError(f"当前版本号无效: {cur_str}") from exc
+        raise UpdateCheckError("invalid_version", detail=cur_str) from exc
 
     if sys.platform not in ("win32", "darwin"):
-        raise ValueError("当前平台不支持自动更新")
+        raise UpdateCheckError("unsupported_platform")
 
     settings = Settings()
     repo = (settings.get("github.repo") or "").strip()
@@ -169,17 +217,26 @@ def check_for_update(current_version: Optional[str] = None) -> Optional[UpdateOf
 
 def check_for_update_safe(
     current_version: Optional[str] = None,
-) -> tuple[Optional[UpdateOffer], Optional[str]]:
-    """包装 ``check_for_update``，将异常转为用户可读错误信息。"""
+    language: str = "zh",
+) -> tuple[Optional[UpdateOffer], Optional[UpdateCheckFailureText]]:
+    """包装 ``check_for_update``，将异常转为日志/弹窗文案。"""
     try:
-        return check_for_update(current_version), None
+        offer = check_for_update(current_version)
+        clear_rate_limit_backoff(Settings())
+        return offer, None
+    except UpdateCheckError as exc:
+        write_error_log("检查更新失败", f"{exc.code} {exc.context}")
+        if exc.code == "rate_limit":
+            record_rate_limit_backoff(
+                Settings(),
+                int(exc.context.get("reset_unix") or 0),
+            )
+        return None, format_update_check_failure(language, exc.code, **exc.context)
     except Timeout:
-        return None, "连接 GitHub 超时，请检查网络。"
+        return None, format_update_check_failure(language, "timeout")
     except RequestException as exc:
         write_error_log("检查更新失败", str(exc))
-        return None, str(exc)
-    except ValueError as exc:
-        return None, str(exc)
+        return None, format_update_check_failure(language, "network", detail=str(exc))
     except Exception as exc:
         write_error_log("检查更新异常", str(exc))
-        return None, str(exc)
+        return None, format_update_check_failure(language, "unknown", detail=str(exc))
