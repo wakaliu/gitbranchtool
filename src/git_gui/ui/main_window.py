@@ -414,8 +414,9 @@ class MainWindow(QMainWindow):
     def _auto_refresh_current_project_status(self) -> None:
         """每 5 分钟自动刷新当前工程仓库状态，跳过不活跃工程。
 
-        原先在主线程内对每个仓库连续执行 git，大工程会长时间阻塞事件循环，易与 Qt/PySide
-        定时器、信号槽交织引发 native 崩溃；改为后台 Worker 采集状态后仅在主线程写回 UI。
+        定时器槽必须在主线程立即返回：禁止在此调用 subprocess（fork），否则在 Qt 多线程
+        与休眠唤醒后易触发 malloc/atfork 相关 SIGSEGV（见崩溃栈 _posixsubprocess + fork）。
+        不活跃判断、剔除失效路径、git 状态采集均在 Worker 中完成。
         """
         if not self.current_project_path:
             return
@@ -424,37 +425,28 @@ class MainWindow(QMainWindow):
         if self._auto_refresh_busy:
             return
         current_path = self.current_project_path
-        if self.project_manager.is_project_inactive(current_path, stale_days=7):
-            if current_path not in self._inactive_project_paths:
-                self._inactive_project_paths.add(current_path)
-                self.logger.append(f"{current_path.name} 已标记为不活跃工程，自动刷新暂停。")
-            return
-        self._inactive_project_paths.discard(current_path)
-        project = self.project_manager.get_project_by_path(current_path)
-        if not project:
-            return
-        removed = self.project_manager.prune_invalid_repositories(project)
-        if removed > 0 and current_path == self.current_project_path:
-            self.repo_panel.load_repositories(project.repositories)
-        if not project.repositories:
-            if removed > 0:
-                self.statusBar().showMessage(f"自动刷新：已移除 {removed} 个无效仓库")
-            return
-        repo_paths = [r.path for r in project.repositories]
         self._auto_refresh_busy = True
-        pruned_count = removed
 
-        def collect_statuses() -> tuple[Path, int, list[tuple[Path, str, str, int, int]]]:
+        def run_auto_refresh() -> tuple[str, Path, int, list[tuple[Path, str, str, int, int]]]:
+            pm = self.project_manager
+            project = pm.get_project_by_path(current_path)
+            if not project:
+                return ("missing", current_path, 0, [])
+            if pm.is_project_inactive(current_path, stale_days=7):
+                return ("inactive", current_path, 0, [])
+            removed = pm.prune_invalid_repositories(project)
+            if not project.repositories:
+                return ("empty", current_path, removed, [])
             from ..utils.file_utils import get_current_branch, get_sync_status
 
             rows: list[tuple[Path, str, str, int, int]] = []
-            for rp in repo_paths:
+            for rp in list(project.repositories):
                 branch = get_current_branch(rp)
                 status, ahead_count, behind_count = get_sync_status(rp)
                 rows.append((rp, branch, status, ahead_count, behind_count))
-            return current_path, pruned_count, rows
+            return ("ok", current_path, removed, rows)
 
-        worker = Worker(collect_statuses)
+        worker = Worker(run_auto_refresh)
         worker.setAutoDelete(True)
         worker.signals.finished.connect(self._on_auto_refresh_worker_finished)
         worker.signals.error.connect(self._on_auto_refresh_worker_failed)
@@ -463,13 +455,28 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_worker_finished(self, payload: object) -> None:
         """自动刷新 git 采集完成，在主线程合并到模型并刷新表格。"""
         self._auto_refresh_busy = False
-        if not isinstance(payload, tuple) or len(payload) != 3:
+        if not isinstance(payload, tuple) or len(payload) != 4:
             return
-        path, removed, rows = payload
+        kind, path, removed, rows = payload
         if path != self.current_project_path:
             return
+        if kind == "missing":
+            return
+        if kind == "inactive":
+            if path not in self._inactive_project_paths:
+                self._inactive_project_paths.add(path)
+                self.logger.append(f"{path.name} 已标记为不活跃工程，自动刷新暂停。")
+            return
+        self._inactive_project_paths.discard(path)
         project = self.project_manager.get_project_by_path(path)
         if not project:
+            return
+        if kind == "empty":
+            self.repo_panel.load_repositories(project.repositories)
+            if removed > 0:
+                self.statusBar().showMessage(f"自动刷新：已移除 {removed} 个无效仓库")
+            return
+        if kind != "ok":
             return
         by_path: dict[str, tuple[Path, str, str, int, int]] = {}
         for row in rows:
