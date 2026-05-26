@@ -39,10 +39,17 @@ class OperationLogger:
 
     为什么独立成类：便于在多线程环境中安全追加日志，同时控制内存 (限制行数)。
     """
-    def __init__(self, max_lines: int = 500, on_log_updated: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        max_lines: int = 500,
+        on_log_updated: Optional[Callable[[str], None]] = None,
+        on_log_refresh: Optional[Callable[[list[str]], None]] = None,
+    ):
         self.max_lines = max_lines
         self.on_log_updated = on_log_updated
+        self.on_log_refresh = on_log_refresh
         self._logs: list[str] = []
+        self._ephemeral_logs: set[str] = set()
         self._start_time: Optional[float] = None
 
     def start_operation(self, operation_name: str) -> None:
@@ -71,17 +78,49 @@ class OperationLogger:
 
         # 滚动清理，保持内存占用低
         if len(self._logs) > self.max_lines:
+            removed = self._logs[:-self.max_lines]
             self._logs = self._logs[-self.max_lines:]
+            for line in removed:
+                self._ephemeral_logs.discard(line)
 
         if self.on_log_updated:
             self.on_log_updated(log_line)
 
+    def append_ephemeral(self, message: str) -> None:
+        """追加可在更新检查等流程结束后自动移除的临时日志。"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_line = f"[{timestamp}] {message}"
+        self._logs.append(log_line)
+        self._ephemeral_logs.add(log_line)
+
+        if len(self._logs) > self.max_lines:
+            removed = self._logs[:-self.max_lines]
+            self._logs = self._logs[-self.max_lines:]
+            for line in removed:
+                self._ephemeral_logs.discard(line)
+
+        if self.on_log_updated:
+            self.on_log_updated(log_line)
+
+    def clear_ephemeral(self) -> None:
+        """移除临时日志并刷新 UI，避免更新检查噪声长期占用运行日志区。"""
+        if not self._ephemeral_logs:
+            return
+        self._logs = [line for line in self._logs if line not in self._ephemeral_logs]
+        self._ephemeral_logs.clear()
+        if self.on_log_refresh:
+            self.on_log_refresh(list(self._logs))
+
     def clear(self) -> None:
         """清空日志 (用户手动或新操作前)。"""
         self._logs.clear()
+        self._ephemeral_logs.clear()
         self._start_time = None
         if self.on_log_updated:
             self.on_log_updated("日志已清空。")
+
+    def get_log_lines(self) -> list[str]:
+        return list(self._logs)
 
     def get_logs(self) -> str:
         return "\n".join(self._logs)

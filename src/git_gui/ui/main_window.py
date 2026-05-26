@@ -48,7 +48,8 @@ class MainWindow(QMainWindow):
         self.git_manager = GitManager()
         self.logger = OperationLogger(
             max_lines=self.settings.get("ui.log_max_lines", 500),
-            on_log_updated=self._on_log_updated
+            on_log_updated=self._on_log_updated,
+            on_log_refresh=self._on_log_refresh,
         )
         self.thread_pool = ThreadPoolManager()
         self.current_selected_repos: list[Path] = []
@@ -69,6 +70,8 @@ class MainWindow(QMainWindow):
             self,
             self._schedule_on_main_thread,
             log_fn=self.logger.append,
+            log_ephemeral_fn=self.logger.append_ephemeral,
+            clear_ephemeral_logs_fn=self.logger.clear_ephemeral,
         )
         self._action_check_update = None
 
@@ -1097,6 +1100,12 @@ class MainWindow(QMainWindow):
             self.log_text.append_log(text)
         else:
             self.log_text.append_log(text)
+
+    def _on_log_refresh(self, lines: list[str]) -> None:
+        """临时日志移除后重建运行日志区，保留 Git 操作等持久条目。"""
+        self.log_text.clear_logs()
+        for line in lines:
+            self.log_text.append_log(line)
 
     def closeEvent(self, event) -> None:
         """退出时保存状态；更新流程中会先取消后台下载。"""

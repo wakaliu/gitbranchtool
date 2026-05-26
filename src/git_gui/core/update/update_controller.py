@@ -55,11 +55,15 @@ class UpdateController(QObject):
         parent: QWidget,
         dispatch_to_main: Callable[[Callable], None],
         log_fn: Optional[Callable[[str], None]] = None,
+        log_ephemeral_fn: Optional[Callable[[str], None]] = None,
+        clear_ephemeral_logs_fn: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(parent)
         self._parent = parent
         self._dispatch_to_main = dispatch_to_main
         self._log = log_fn
+        self._log_ephemeral = log_ephemeral_fn
+        self._clear_ephemeral_logs_fn = clear_ephemeral_logs_fn
         self._settings = Settings()
         self._thread_pool = ThreadPoolManager()
         self._checking = False
@@ -112,6 +116,15 @@ class UpdateController(QObject):
         if self._log:
             self._log(message)
 
+    def _append_ephemeral_log(self, message: str) -> None:
+        fn = self._log_ephemeral or self._log
+        if fn:
+            fn(message)
+
+    def _clear_ephemeral_logs(self) -> None:
+        if self._clear_ephemeral_logs_fn:
+            self._clear_ephemeral_logs_fn()
+
     def _set_flow_locked(self, locked: bool) -> None:
         self._flow_active = locked
         lock_fn = getattr(self._parent, "set_update_flow_locked", None)
@@ -145,7 +158,7 @@ class UpdateController(QObject):
                     self._settings, self._settings.language
                 )
                 when_text = f"约 {when} 后可重试" if when else "请稍后再试"
-                self._append_log(
+                self._append_ephemeral_log(
                     t.log_skip_rate_limit_backoff.format(when=when_text)
                 )
                 if not auto:
@@ -157,7 +170,7 @@ class UpdateController(QObject):
             elif gate.silent:
                 remain_sec = startup_cooldown_remaining_seconds(self._settings)
                 if remain_sec > 0:
-                    self._append_log(
+                    self._append_ephemeral_log(
                         t.log_skip_startup_cooldown.format(
                             cooldown=startup_check_cooldown_minutes(self._settings),
                             remain=self._format_cooldown_remain(remain_sec),
@@ -167,8 +180,9 @@ class UpdateController(QObject):
 
         if auto:
             record_auto_check_attempt(self._settings)
+        self._clear_ephemeral_logs()
         self._checking = True
-        self._append_log(t.log_check_start)
+        self._append_ephemeral_log(t.log_check_start)
         parent = self._parent
         if hasattr(parent, "statusBar"):
             parent.statusBar().showMessage(t.status_checking)
@@ -229,13 +243,13 @@ class UpdateController(QObject):
         offer, failure = result
         t = get_update_texts(self._settings.language)
         if failure is not None:
-            self._append_log(failure.log_line)
             if not auto:
                 QMessageBox.warning(
                     self._parent,
                     t.msg_check_failed_title,
                     failure.dialog_message,
                 )
+            self._clear_ephemeral_logs()
             return
         if offer is None:
             if not auto:
@@ -244,10 +258,12 @@ class UpdateController(QObject):
                     t.msg_latest_title,
                     t.msg_latest_body,
                 )
+            self._clear_ephemeral_logs()
             return
         if auto:
             dismissed = str(self._settings.get("update.auto_dismissed_version", "") or "").strip()
             if dismissed == offer.version:
+                self._clear_ephemeral_logs()
                 return
         self._show_offer_dialog(offer, auto)
 
@@ -257,7 +273,6 @@ class UpdateController(QObject):
         failure = format_update_check_failure(
             self._settings.language, "unknown", detail=err
         )
-        self._append_log(failure.log_line)
         if not auto:
             t = get_update_texts(self._settings.language)
             QMessageBox.warning(
@@ -265,6 +280,7 @@ class UpdateController(QObject):
                 t.msg_check_failed_title,
                 failure.dialog_message,
             )
+        self._clear_ephemeral_logs()
 
     def _restore_status_after_check(self) -> None:
         if self._flow_active:
@@ -289,7 +305,10 @@ class UpdateController(QObject):
         if result == UpdateDialogResult.DISMISS:
             self._settings.set("update.auto_dismissed_version", offer.version)
         elif result == UpdateDialogResult.UPDATE_NOW:
+            self._clear_ephemeral_logs()
             self._start_download_and_install(offer)
+            return
+        self._clear_ephemeral_logs()
 
     def _refresh_download_progress_ui(self) -> None:
         """由主线程定时器驱动进度刷新；macOS curl 下载在此轮询子进程。"""

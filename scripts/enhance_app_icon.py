@@ -9,7 +9,7 @@ import argparse
 import shutil
 from pathlib import Path
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 
 def _premultiply_rgba(im: Image.Image) -> Image.Image:
@@ -75,6 +75,20 @@ def _brighten_foreground(im: Image.Image, bg: tuple[int, int, int], *, thr: int,
     return out
 
 
+def _apply_rounded_corners(im: Image.Image, radius: int) -> Image.Image:
+    """按圆角矩形裁切画布，四角透明，便于 exe / 任务栏呈现现代圆角图标。"""
+    if radius <= 0:
+        return im.convert("RGBA")
+    im = im.convert("RGBA")
+    w, h = im.size
+    radius = min(radius, w // 2, h // 2)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.paste(im, (0, 0), mask)
+    return out
+
+
 def render_enhanced_icon(
     src: Path,
     *,
@@ -82,6 +96,7 @@ def render_enhanced_icon(
     fill_ratio: float,
     brighten: float,
     bg_rgb: tuple[int, int, int],
+    corner_radius_ratio: float,
 ) -> Image.Image:
     im = Image.open(src).convert("RGBA")
     bbox = im.getbbox()
@@ -107,7 +122,8 @@ def render_enhanced_icon(
 
     canvas_img = _brighten_foreground(canvas_img, bg_rgb, thr=28, mult=brighten)
     canvas_img = canvas_img.filter(ImageFilter.UnsharpMask(radius=0.55, percent=58, threshold=3))
-    return canvas_img
+    corner_radius = int(canvas * corner_radius_ratio)
+    return _apply_rounded_corners(canvas_img, corner_radius)
 
 
 def main() -> None:
@@ -128,6 +144,12 @@ def main() -> None:
     parser.add_argument("--bg-r", type=int, default=11)
     parser.add_argument("--bg-g", type=int, default=18)
     parser.add_argument("--bg-b", type=int, default=32)
+    parser.add_argument(
+        "--corner-radius-ratio",
+        type=float,
+        default=0.20,
+        help="圆角半径占画布边长比例（0 关闭；默认 0.20 接近 macOS / Win11 应用图标观感）",
+    )
     args = parser.parse_args()
     bg = (args.bg_r, args.bg_g, args.bg_b)
     img = render_enhanced_icon(
@@ -136,6 +158,7 @@ def main() -> None:
         fill_ratio=args.fill_ratio,
         brighten=args.brighten,
         bg_rgb=bg,
+        corner_radius_ratio=args.corner_radius_ratio,
     )
     args.out_png.parent.mkdir(parents=True, exist_ok=True)
     img.save(args.out_png, format="PNG", optimize=True)
