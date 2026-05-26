@@ -82,46 +82,59 @@ fi
 DISK_NAME="$(basename "${VOL_MOUNT}")"
 
 ditto "${STAGING}/${APP_BUNDLE}" "${VOL_MOUNT}/${APP_BUNDLE}"
-rm -f "${VOL_MOUNT}/Applications"
+rm -f "${VOL_MOUNT}/Applications" "${VOL_MOUNT}/安装说明.txt"
 
-if ! osascript -e "tell application \"Finder\" to make new alias file at (POSIX file \"${VOL_MOUNT}\" as alias) to (POSIX file \"/Applications\" as alias) with properties {name:\"Applications\"}"; then
-  echo "警告: Finder 别名创建失败，回退符号链接（拖放可能无效）" >&2
-  ln -sf /Applications "${VOL_MOUNT}/Applications"
-fi
+# 兜底：即使 Finder 背景未写入 .DS_Store，用户也能看到文字说明
+cat > "${VOL_MOUNT}/安装说明.txt" <<'EOF'
+请将左侧应用图标拖到右侧「应用程序」文件夹完成安装。
+
+Drag the app icon into the Applications folder to install.
+EOF
 
 mkdir -p "${VOL_MOUNT}/.background"
 cp -f "${BACKGROUND}" "${VOL_MOUNT}/.background/background.png"
-if command -v SetFile >/dev/null 2>&1; then
-  SetFile -a V "${VOL_MOUNT}/.background" 2>/dev/null || true
+BG_TIFF="${VOL_MOUNT}/.background/background.tiff"
+if command -v sips >/dev/null 2>&1; then
+  sips -s format tiff "${BACKGROUND}" --out "${BG_TIFF}" >/dev/null 2>&1
 else
-  chflags hidden "${VOL_MOUNT}/.background" 2>/dev/null || true
+  cp -f "${BACKGROUND}" "${BG_TIFF}"
 fi
 
-# Finder 仅对 /Volumes 下卷名生效（自定义 mountpoint 无法设置背景）
-osascript <<APPLESCRIPT || echo "警告: Finder 窗口布局设置失败，DMG 仍可用但无拖放引导背景" >&2
+# Finder 写入 .DS_Store（须在本机图形会话下运行；顺序参考 create-dmg / StackOverflow）
+osascript <<APPLESCRIPT || echo "警告: Finder 窗口布局设置失败，DMG 仍可用（请查看「安装说明.txt」）" >&2
 tell application "Finder"
   tell disk "${DISK_NAME}"
     open
-    set theWindow to container window
-    set current view of theWindow to icon view
-    set toolbar visible of theWindow to false
-    set statusbar visible of theWindow to false
-    set the bounds of theWindow to {${WIN_X}, ${WIN_Y}, $((WIN_X + WIN_W)), $((WIN_Y + WIN_H))}
-    set viewOptions to the icon view options of theWindow
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {${WIN_X}, ${WIN_Y}, $((WIN_X + WIN_W)), $((WIN_Y + WIN_H))}
+    set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
     set icon size of viewOptions to ${ICON_SIZE}
-    set background picture of viewOptions to file ".background:background.png"
-    set position of item "${APP_BUNDLE}" of theWindow to {${APP_ICON_X}, ${APP_ICON_Y}}
-    set position of item "Applications" of theWindow to {${APPS_ICON_X}, ${APPS_ICON_Y}}
-    close
-    open
+    set background picture of viewOptions to file ".background:background.tiff"
+    try
+      make new alias file at container window to POSIX file "/Applications" with properties {name:"Applications"}
+    end try
+    set position of item "${APP_BUNDLE}" of container window to {${APP_ICON_X}, ${APP_ICON_Y}}
+    set position of item "Applications" of container window to {${APPS_ICON_X}, ${APPS_ICON_Y}}
+    set position of item "安装说明.txt" of container window to {320, 320}
     update without registering applications
-    delay 1
+    delay 5
     close
   end tell
 end tell
 APPLESCRIPT
 
+if command -v bless >/dev/null 2>&1; then
+  bless --folder "${VOL_MOUNT}" --openfolder 2>/dev/null || true
+fi
+if command -v SetFile >/dev/null 2>&1; then
+  SetFile -a C "${VOL_MOUNT}" 2>/dev/null || true
+fi
+
+sync
+sleep 1
 sync
 hdiutil detach "${VOL_MOUNT}" -quiet
 hdiutil convert "${RW_DMG}" -format UDZO -imagekey zlib-level=9 -o "${DMG_PATH}" >/dev/null
