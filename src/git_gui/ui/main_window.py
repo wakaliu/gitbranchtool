@@ -27,6 +27,8 @@ from .components.settings_dialog import SettingsDialog
 from .components.branch_favorite_dialog import BranchFavoriteDialog
 from .components.git_console_dialog import GitConsoleDialog
 from .components.clone_project_dialog import CloneProjectDialog
+from ..core.update.update_controller import UpdateController
+from ..ui.i18n.update_texts import get_update_texts
 from .widgets.log_text_edit import LogTextEdit
 from .widgets.progress_dialog import OperationProgressDialog
 from .theme import build_app_stylesheet, get_icon
@@ -62,6 +64,13 @@ class MainWindow(QMainWindow):
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(5 * 60 * 1000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_current_project_status)
+        self._update_flow_locked = False
+        self._update_controller = UpdateController(
+            self,
+            self._schedule_on_main_thread,
+            log_fn=self.logger.append,
+        )
+        self._action_check_update = None
 
         self._setup_ui()
         self._connect_signals()
@@ -74,6 +83,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._run_startup_project_scan)
         QTimer.singleShot(1, self._apply_settings_to_ui)
         self._auto_refresh_timer.start()
+        self._update_controller.schedule_startup_check()
 
         self.setWindowTitle(f"{self.settings.get('app.name')} v{self.settings.get('app.version')}")
         self.resize(1400, 900)
@@ -89,6 +99,10 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("设置", self._show_settings)
 
         help_menu = menubar.addMenu("帮助")
+        self._action_check_update = help_menu.addAction(
+            get_update_texts(self.settings.language).menu_check_updates,
+            lambda: self._update_controller.run_check(auto=False),
+        )
         help_menu.addAction("关于", self._show_about)
 
         # 中央部件
@@ -420,6 +434,8 @@ class MainWindow(QMainWindow):
         """
         if not self.current_project_path:
             return
+        if self._update_flow_locked:
+            return
         if self._is_git_operation_running():
             return
         if self._auto_refresh_busy:
@@ -455,6 +471,8 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_worker_finished(self, payload: object) -> None:
         """自动刷新 git 采集完成，在主线程合并到模型并刷新表格。"""
         self._auto_refresh_busy = False
+        if self._update_flow_locked:
+            return
         if not isinstance(payload, tuple) or len(payload) != 4:
             return
         kind, path, removed, rows = payload
@@ -515,6 +533,8 @@ class MainWindow(QMainWindow):
 
     def _on_auto_refresh_worker_failed(self, err: str) -> None:
         self._auto_refresh_busy = False
+        if self._update_flow_locked:
+            return
         write_error_log("自动刷新后台失败", err[:2000] if err else "")
 
     def _perform_switch(self, target_branch: str, stash: bool) -> None:
@@ -929,6 +949,37 @@ class MainWindow(QMainWindow):
             write_error_log("取消杀进程异常", str(e))
             self.logger.append("取消操作完成（进程终止可能不完全）")
 
+    def set_update_flow_locked(self, locked: bool) -> None:
+        """更新下载/安装期间禁用业务操作，保留窗口最小化/最大化/关闭。"""
+        self._update_flow_locked = locked
+        central = self.centralWidget()
+        if central:
+            central.setEnabled(not locked)
+        self.menuBar().setEnabled(not locked)
+        if hasattr(self, "_action_check_update") and self._action_check_update:
+            self._action_check_update.setEnabled(not locked)
+        if locked:
+            self.pause_background_tasks_for_update()
+        else:
+            self.resume_background_tasks_after_update()
+
+    def pause_background_tasks_for_update(self) -> None:
+        """更新流程期间暂停后台任务，避免 git 子进程与 curl 下载并发导致原生崩溃。"""
+        self._auto_refresh_timer.stop()
+        self._parallel_op_serial += 1
+        self._active_parallel_workers.clear()
+        self._active_stable_worker = None
+        self._kill_git_processes()
+
+    def resume_background_tasks_after_update(self) -> None:
+        """更新流程结束后恢复自动刷新定时器。"""
+        if not self._update_flow_locked:
+            self._auto_refresh_timer.start()
+
+    def _schedule_on_main_thread(self, fn) -> None:
+        """将任意可调用对象安全调度到主线程执行（供 UpdateController 等使用）。"""
+        self.dispatch_to_main.emit(fn)
+
     def _execute_in_main_thread(self, fn) -> None:
         """将任意可调用对象安全调度到主线程执行。"""
         try:
@@ -960,6 +1011,7 @@ class MainWindow(QMainWindow):
         """按当前配置统一应用主题与语言。"""
         self._apply_theme()
         self._apply_language()
+        self._update_controller.on_language_changed()
 
     def _apply_theme(self) -> None:
         """应用浅色/深色主题，确保重启后立即读取到用户设置。"""
@@ -976,6 +1028,10 @@ class MainWindow(QMainWindow):
             tools_menu.addAction("Feedback", self._show_feedback)
             tools_menu.addAction("Settings", self._show_settings)
             help_menu = self.menuBar().addMenu("Help")
+            self._action_check_update = help_menu.addAction(
+                get_update_texts("en").menu_check_updates,
+                lambda: self._update_controller.run_check(auto=False),
+            )
             help_menu.addAction("About", self._show_about)
             self.statusBar().showMessage("Ready")
             self.log_title_label.setText("Runtime Logs (auto cleanup, elapsed time shown)")
@@ -988,6 +1044,10 @@ class MainWindow(QMainWindow):
             tools_menu.addAction("反馈", self._show_feedback)
             tools_menu.addAction("设置", self._show_settings)
             help_menu = self.menuBar().addMenu("帮助")
+            self._action_check_update = help_menu.addAction(
+                get_update_texts("zh").menu_check_updates,
+                lambda: self._update_controller.run_check(auto=False),
+            )
             help_menu.addAction("关于", self._show_about)
             self.statusBar().showMessage("就绪")
             self.log_title_label.setText("运行日志 (自动清理，显示耗时)")
@@ -1039,7 +1099,9 @@ class MainWindow(QMainWindow):
             self.log_text.append_log(text)
 
     def closeEvent(self, event) -> None:
-        """退出时保存状态。"""
+        """退出时保存状态；更新流程中会先取消后台下载。"""
+        if self._update_controller.is_flow_active():
+            self._update_controller.cancel_flow()
         try:
             self._auto_refresh_timer.stop()
         except Exception:

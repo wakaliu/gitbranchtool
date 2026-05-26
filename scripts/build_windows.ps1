@@ -21,15 +21,10 @@ pyinstaller --noconfirm --clean --distpath $distOut --workpath $workWin $specWin
 
 python (Join-Path $Root "scripts\package_windows_zip.py") --dist-dir $distOut
 
-$iss = Join-Path $Root "packaging\windows\GitPullSwitchTool.iss"
-$iscc = @(
-    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-    "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-if ($iscc) {
-    & $iscc $iss
-    Write-Host "安装包: dist\windows-installer\"
-} else {
-    Write-Warning "Inno Setup 6 (ISCC.exe) not found; skipped installer. Portable exe: dist\GitPullSwitchTool.exe"
+. (Join-Path $Root "scripts\inno_setup.ps1")
+$issPublic = Join-Path $Root "packaging\windows\GitPullSwitchTool.iss"
+if (-not (Test-Path (Join-Path $distOut "GitPullSwitchTool.exe"))) {
+    throw "Portable exe missing before Inno: $distOut\GitPullSwitchTool.exe"
 }
+Invoke-InnoSetupBuild -IssPath $issPublic -Label "public"
+Write-Host "安装包目录: $distOut\windows-installer\"

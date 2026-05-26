@@ -21,6 +21,10 @@ pyinstaller --noconfirm --clean --distpath $distPublic --workpath $workPublic $s
 python $pkgZip --dist-dir $distPublic --exe-name GitPullSwitchTool.exe
 Write-Host "Public build: $distPublic\GitPullSwitchTool.exe"
 
+. (Join-Path $Root "scripts\inno_setup.ps1")
+$issPublic = Join-Path $Root "packaging\windows\GitPullSwitchTool.iss"
+Invoke-InnoSetupBuild -IssPath $issPublic -Label "public"
+
 # Internal: embed repo-root sausage_projects.yaml (gitignored). If missing, copy bundle template for this run only.
 $rootYaml = Join-Path $Root "sausage_projects.yaml"
 $templateYaml = Join-Path $Root "src\git_gui\bundle_data\sausage_projects.yaml"
@@ -46,3 +50,10 @@ if ($tempInternalYaml) {
     Write-Host "Removed temporary sausage_projects.yaml"
 }
 Write-Host "Internal (Sausage) build: $distSausage\GitPullSwitchTool-Sausage.exe"
+
+$issSausage = Join-Path $Root "packaging\windows\GitPullSwitchTool-Sausage.iss"
+if (-not (Test-Path (Join-Path $distSausage "GitPullSwitchTool-Sausage.exe"))) {
+    throw "Portable exe missing before Inno: $distSausage\GitPullSwitchTool-Sausage.exe"
+}
+Invoke-InnoSetupBuild -IssPath $issSausage -Label "sausage"
+Write-Host "安装包目录: $distSausage\windows-installer\"

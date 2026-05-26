@@ -15,6 +15,7 @@ from .constants import (
     LOG_MAX_LINES, APP_NAME, APP_VERSION, DEFAULT_PROJECTS_DIR
 )
 from ..utils.runtime_paths import get_config_file_path, get_embedded_assets_dir
+from ..utils.github_repo_config import DEFAULT_GITHUB_REPO, is_valid_github_repo
 
 class Settings:
     """单例配置管理器。
@@ -70,7 +71,16 @@ class Settings:
                 "token": "",
                 "issue_labels": [],
                 "feedback_issues_web_url": "https://github.com/wakaliu/gitbranchtool/issues/new",
-            }
+            },
+            "update": {
+                "check_on_startup": True,
+                "startup_check_cooldown_minutes": 30,
+                "rate_limit_fallback_minutes": 60,
+                "last_auto_check_at": 0,
+                "last_check_at": 0,
+                "rate_limit_backoff_until": 0,
+                "auto_dismissed_version": "",
+            },
         }
 
         config_path = get_config_file_path()
@@ -82,15 +92,56 @@ class Settings:
             except Exception:
                 pass  # 配置文件损坏时使用默认值，避免启动失败
 
+        self._repair_placeholder_github_config()
         if getattr(sys, "frozen", False):
-            app_cfg = self._config.setdefault("app", {})
-            if str(app_cfg.get("version", "")).strip() != APP_VERSION:
-                app_cfg["version"] = APP_VERSION
-                try:
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        yaml.dump(self._config, f, allow_unicode=True, sort_keys=False)
-                except Exception:
-                    pass
+            self._sync_frozen_app_metadata(config_path)
+
+    def _repair_placeholder_github_config(self) -> None:
+        """用户 config 若仍为模板占位 github.repo，用嵌入默认值覆盖并写回。"""
+        gh = self._config.setdefault("github", {})
+        repo = str(gh.get("repo", "")).strip()
+        if is_valid_github_repo(repo):
+            return
+        embedded = get_embedded_assets_dir() / "config.embedded.yaml"
+        emb_gh: Dict[str, Any] = {}
+        if embedded.exists():
+            try:
+                with open(embedded, "r", encoding="utf-8") as f:
+                    emb_gh = (yaml.safe_load(f) or {}).get("github") or {}
+            except Exception:
+                pass
+        if not emb_gh:
+            emb_gh = {
+                "repo": DEFAULT_GITHUB_REPO,
+                "issues_url": f"https://api.github.com/repos/{DEFAULT_GITHUB_REPO}/issues",
+                "feedback_issues_web_url": f"https://github.com/{DEFAULT_GITHUB_REPO}/issues/new",
+            }
+        token_keep = gh.get("token")
+        for key, value in emb_gh.items():
+            if key == "token":
+                continue
+            gh[key] = value
+        if token_keep:
+            gh["token"] = token_keep
+        if getattr(sys, "frozen", False):
+            try:
+                with open(get_config_file_path(), "w", encoding="utf-8") as f:
+                    yaml.dump(self._config, f, allow_unicode=True, sort_keys=False)
+            except Exception:
+                pass
+
+    def _sync_frozen_app_metadata(self, config_path: Path) -> None:
+        """打包版同步 app.version 等与构建一致的字段。"""
+        app_cfg = self._config.setdefault("app", {})
+        dirty = str(app_cfg.get("version", "")).strip() != APP_VERSION
+        if not dirty:
+            return
+        app_cfg["version"] = APP_VERSION
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(self._config, f, allow_unicode=True, sort_keys=False)
+        except Exception:
+            pass
 
     def _merge_config(self, base: Dict, override: Dict) -> None:
         """递归合并配置字典。"""
