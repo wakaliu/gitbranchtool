@@ -51,12 +51,14 @@ def _format_zh(
         return UpdateCheckFailureText(
             log_line=f"检查更新失败：GitHub 访问过于频繁，{when}",
             dialog_message=(
-                "无法向 GitHub 查询新版本。\n\n"
-                "原因：API 访问次数已达上限（未配置 Token 时约 60 次/小时）。\n\n"
+                "无法向 GitHub 查询新版本（API 与网页兜底均未成功）。\n\n"
+                "原因：REST API 配额已用尽（未配置 Token 时同一出口 IP 约 60 次/小时）。"
+                "公司网络、代理或本机反复启动/检查会共用该配额，"
+                "到提示时间后也可能立刻再次被占满。\n\n"
                 "你可以：\n"
                 f"{_bullet_retry(when, 'zh')}\n"
-                "• 在「工具 → 设置」中配置 GitHub Token（限额约升至 5000 次/小时）\n"
-                "• 公开仓库无需 Token 也能检查；请勿在短时间内反复点击「检查更新」"
+                "• 在「工具 → 设置」中配置 GitHub Token（限额约升至 5000 次/小时，推荐）\n"
+                "• 关闭「启动时自动检查更新」，测试时勿连续多次点击「检查更新」"
             ),
         )
     if code == "token_invalid":
@@ -146,12 +148,14 @@ def _format_en(
         return UpdateCheckFailureText(
             log_line=f"Update check failed: GitHub API rate limit; {when}",
             dialog_message=(
-                "Could not check GitHub for a new version.\n\n"
-                "Reason: API rate limit reached (about 60 requests/hour without a token).\n\n"
+                "Could not check GitHub for a new version (API and web fallback both failed).\n\n"
+                "Reason: REST API quota exhausted (about 60 requests/hour per egress IP without a "
+                "token). Shared office networks, proxies, or repeated startup checks can use the "
+                "quota immediately after the reset time shown.\n\n"
                 "You can:\n"
                 f"{_bullet_retry(when, 'en')}\n"
-                "• Add a GitHub token under Tools → Settings (about 5000 requests/hour)\n"
-                "• Public repos work without a token; avoid clicking Check for Updates repeatedly"
+                "• Add a GitHub token under Tools → Settings (about 5000 requests/hour, recommended)\n"
+                "• Disable check-on-startup and avoid hammering Check for Updates while testing"
             ),
         )
     if code == "token_invalid":

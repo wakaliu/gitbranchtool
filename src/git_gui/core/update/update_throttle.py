@@ -27,7 +27,7 @@ def _format_reset_hint(unix_ts: float, language: str) -> str:
     if unix_ts <= 0:
         return ""
     try:
-        return datetime.fromtimestamp(unix_ts).strftime("%H:%M")
+        return datetime.fromtimestamp(unix_ts).strftime("%H:%M:%S")
     except (ValueError, OSError):
         return ""
 

@@ -76,7 +76,9 @@ chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
   - 香肠内部版 Windows：`GitPullSwitchTool-Sausage-Setup-{版本号}.exe`
   - 公开版 macOS：`GitPullSwitchTool.dmg`
   - 香肠内部版 macOS：`GitPullSwitchTool-Sausage.dmg`
+- macOS 更新：大文件下载使用系统 **curl** 子进程（避免 PySide 线程池内 SSL 崩溃）；下载完成后应用会退出，后台脚本将 DMG 内 `.app` 安装到 **「应用程序」**（`/Applications/GitPullSwitchTool.app` 或 `-Sausage`），并自动启动、在 Finder 中定位；日志见 `~/Library/Application Support/GitPullSwitchTool/updates/apply_update.log`。若从 DMG 或任意目录直接运行旧包，请到「应用程序」中打开新版本。
 - macOS 未签名 DMG 更新后若被 Gatekeeper 拦截，请在「隐私与安全性」中放行；配置 GitHub Token 可提高 API 检查频率。
+- REST API 限流时会自动改用 `github.com/releases/latest` 网页通道检查（不占 60 次/小时配额）；若仍失败，多为共享出口 IP 或需配置 Token。
 
 ### 最小验收清单
 

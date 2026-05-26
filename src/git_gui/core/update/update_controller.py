@@ -1,6 +1,10 @@
 """编排更新检查、弹窗、下载与退出后安装。"""
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer
@@ -14,7 +18,7 @@ from ...ui.i18n.update_texts import UpdateTextBundle, get_update_texts
 from ...utils.runtime_paths import is_pyinstaller_bundle
 from ...utils.thread_pool import ThreadPoolManager, Worker
 from .check_messages import UpdateCheckFailureText, format_update_check_failure
-from .release_checker import UpdateOffer, check_for_update_safe
+from .release_checker import UpdateOffer, check_for_update_safe, probe_release_asset_size
 from .update_throttle import (
     evaluate_update_check_gate,
     rate_limit_backoff_reset_hint,
@@ -27,10 +31,20 @@ from .update_installer import (
     download_update,
     get_updates_dir,
     launch_apply_after_quit,
+    macos_install_target_app,
+    probe_release_asset_size_curl,
+    read_curl_download_error,
+    start_curl_download,
+    terminate_curl_download,
+    verify_macos_dmg_download,
+    reveal_path_in_finder,
 )
 
 _STARTUP_CHECK_DELAY_MS = 2000
-_INSTALL_NOTICE_MS = 2500
+_INSTALL_NOTICE_MS = 6500
+_DOWNLOAD_STALL_HINT_SEC = 20
+_DOWNLOAD_STALL_ABORT_SEC = 90
+_MAX_CURL_DOWNLOAD_RETRIES = 2
 
 
 class UpdateController(QObject):
@@ -56,6 +70,17 @@ class UpdateController(QObject):
         self._progress: Optional[UpdateProgressDialog] = None
         self._active_worker: Optional[Worker] = None
         self._ignore_progress_close = False
+        self._download_bytes_done = 0
+        self._download_bytes_total = 0
+        self._download_last_size = 0
+        self._download_last_growth_at = 0.0
+        self._curl_proc: Optional[subprocess.Popen] = None
+        self._curl_offer: Optional[UpdateOffer] = None
+        self._download_dest: Optional[Path] = None
+        self._curl_retry_count = 0
+        self._download_progress_timer = QTimer(self)
+        self._download_progress_timer.setInterval(250)
+        self._download_progress_timer.timeout.connect(self._refresh_download_progress_ui)
 
     def schedule_startup_check(self) -> None:
         """打包版且开启启动检查时，延迟触发自动检测。"""
@@ -150,6 +175,10 @@ class UpdateController(QObject):
         if hasattr(parent, "_action_check_update"):
             parent._action_check_update.setEnabled(False)
 
+        if sys.platform == "darwin":
+            QTimer.singleShot(0, lambda: self._run_check_on_main_thread(auto))
+            return
+
         worker = Worker(
             check_for_update_safe,
             self._current_version_str(),
@@ -166,6 +195,17 @@ class UpdateController(QObject):
             )
         )
         self._thread_pool.start(worker)
+
+    def _run_check_on_main_thread(self, auto: bool) -> None:
+        """macOS 在主线程检查更新，避免 QThreadPool 与 requests/SSL 交互崩溃。"""
+        try:
+            result = check_for_update_safe(
+                self._current_version_str(),
+                self._settings.language,
+            )
+            self._on_check_finished(result, auto)
+        except Exception as exc:
+            self._on_check_error(str(exc), auto)
 
     def _current_version_str(self) -> str:
         return str(self._settings.get("app.version", APP_VERSION) or APP_VERSION).strip()
@@ -251,23 +291,168 @@ class UpdateController(QObject):
         elif result == UpdateDialogResult.UPDATE_NOW:
             self._start_download_and_install(offer)
 
-    def _apply_download_progress(self, done: int, total: int) -> None:
-        """在主线程更新下载进度条（避免 Worker progress 信号类型不匹配导致闪退）。"""
+    def _refresh_download_progress_ui(self) -> None:
+        """由主线程定时器驱动进度刷新；macOS curl 下载在此轮询子进程。"""
+        if self._curl_proc is not None:
+            self._poll_curl_download()
+            return
+        self._apply_download_progress(self._download_bytes_done, self._download_bytes_total)
+
+    def _poll_curl_download(self) -> None:
+        """轮询 curl 子进程与本地文件大小（仅主线程）。"""
+        proc = self._curl_proc
+        dest = self._download_dest
+        offer = self._curl_offer
+        if proc is None or dest is None or offer is None:
+            return
+        now = time.monotonic()
+        if dest.exists():
+            try:
+                size = dest.stat().st_size
+                if size > self._download_last_size:
+                    self._download_last_size = size
+                    self._download_last_growth_at = now
+                self._download_bytes_done = size
+                if size > self._download_bytes_total:
+                    self._download_bytes_total = size
+            except OSError:
+                pass
+        curl_running = proc.poll() is None
+        stalled_sec = now - self._download_last_growth_at
+        stall_hint = curl_running and stalled_sec >= _DOWNLOAD_STALL_HINT_SEC
+        stall_retry = curl_running and stalled_sec >= _DOWNLOAD_STALL_ABORT_SEC
+        if stall_retry:
+            if self._curl_retry_count < _MAX_CURL_DOWNLOAD_RETRIES:
+                self._retry_curl_download()
+                return
+            terminate_curl_download(proc)
+            self._curl_proc = None
+            self._stop_download_progress_timer()
+            self._cleanup_partial_download(dest)
+            t = get_update_texts(self._settings.language)
+            self._on_download_worker_error(t.msg_download_stalled)
+            return
+        self._apply_download_progress(
+            self._download_bytes_done,
+            self._download_bytes_total,
+            curl_running=curl_running,
+            stall_hint=stall_hint,
+        )
+        if curl_running:
+            return
+        self._curl_proc = None
+        self._stop_download_progress_timer()
+        if self._cancel_requested:
+            self._cleanup_partial_download(dest)
+            self._cleanup_progress_dialog()
+            self._end_flow_unlock()
+            return
+        if proc.returncode != 0:
+            self._cleanup_partial_download(dest)
+            self._on_download_worker_error(read_curl_download_error(proc))
+            return
+        self._on_download_finished((offer, str(dest)))
+
+    def _cleanup_partial_download(self, dest: Path) -> None:
+        try:
+            if dest.exists():
+                dest.unlink()
+        except OSError:
+            pass
+
+    def _retry_curl_download(self) -> None:
+        """下载长时间无字节增长时终止 curl 并以 ``-C -`` 断点续传。"""
+        offer = self._curl_offer
+        dest = self._download_dest
+        if offer is None or dest is None:
+            return
+        proc = self._curl_proc
+        if proc is not None:
+            terminate_curl_download(proc)
+            self._curl_proc = None
+        self._curl_retry_count += 1
+        t = get_update_texts(self._settings.language)
+        self._append_log(
+            t.log_download_retry.format(
+                attempt=self._curl_retry_count,
+                max_attempts=_MAX_CURL_DOWNLOAD_RETRIES,
+            )
+        )
+        try:
+            if dest.exists():
+                size = dest.stat().st_size
+                self._download_bytes_done = size
+                self._download_last_size = size
+        except OSError:
+            pass
+        self._download_last_growth_at = time.monotonic()
+        try:
+            self._curl_proc, self._download_dest = start_curl_download(offer, resume=True)
+        except OSError as exc:
+            self._stop_download_progress_timer()
+            self._on_download_worker_error(str(exc))
+            return
+        self._apply_download_progress(
+            self._download_bytes_done,
+            self._download_bytes_total,
+            curl_running=True,
+            stall_hint=False,
+            stall_retry=True,
+        )
+
+    def _abort_curl_download(self) -> None:
+        proc = self._curl_proc
+        if proc is not None:
+            terminate_curl_download(proc)
+            self._curl_proc = None
+        dest = self._download_dest
+        if dest is not None:
+            self._cleanup_partial_download(dest)
+
+    def _stop_download_progress_timer(self) -> None:
+        self._download_progress_timer.stop()
+
+    def _apply_download_progress(
+        self,
+        done: int,
+        total: int,
+        *,
+        curl_running: bool = False,
+        stall_hint: bool = False,
+        stall_retry: bool = False,
+    ) -> None:
+        """在主线程更新下载进度条。"""
         if self._progress is None or self._cancel_requested:
             return
         t = get_update_texts(self._settings.language)
         if total <= 0 and done <= 0:
             self._progress.set_download_indeterminate(t.progress_label)
             return
-        total_mb = total / (1024 * 1024) if total > 0 else 0.0
-        percent = int(done * 100 / total) if total > 0 else 0
+        display_total = max(total, done) if total > 0 else done
+        total_mb = display_total / (1024 * 1024) if display_total > 0 else 0.0
+        if display_total > 0:
+            percent = int(done * 100 / display_total)
+            if curl_running and percent >= 99:
+                percent = 99
+        else:
+            percent = 0
         if done <= 0 and total > 0:
             detail = t.progress_label
-        else:
+        elif display_total > 0:
             detail = t.progress_downloading.format(
                 done_mb=done / (1024 * 1024),
                 total_mb=total_mb,
             )
+        else:
+            detail = t.progress_download_unknown_total.format(
+                done_mb=done / (1024 * 1024),
+            )
+        if curl_running and total > 0 and done >= int(total * 0.92):
+            detail = f"{detail}\n{t.progress_download_finishing}"
+        if stall_retry:
+            detail = f"{detail}\n{t.progress_download_stall_retry}"
+        elif stall_hint:
+            detail = f"{detail}\n{t.progress_download_slow}"
         pct_text = t.progress_download_percent.format(percent=percent)
         self._progress.set_download_progress(percent, f"{pct_text}\n{detail}")
 
@@ -284,11 +469,41 @@ class UpdateController(QObject):
         self._progress.finished.connect(self._on_progress_dialog_finished)
         self._progress.show()
 
+        self._download_bytes_done = 0
+        if sys.platform == "darwin":
+            probed_size = probe_release_asset_size_curl(offer.download_url)
+        else:
+            probed_size = probe_release_asset_size(offer.download_url)
+        self._download_bytes_total = probed_size or int(offer.asset_size or 0)
+        self._download_last_size = 0
+        self._download_last_growth_at = time.monotonic()
+        self._curl_proc = None
+        self._curl_offer = None
+        self._download_dest = None
+        self._curl_retry_count = 0
+
+        if sys.platform == "darwin":
+            try:
+                self._curl_offer = offer
+                self._curl_proc, self._download_dest = start_curl_download(offer)
+                self._download_progress_timer.start()
+            except OSError as exc:
+                self._cleanup_progress_dialog()
+                self._end_flow_unlock()
+                QMessageBox.warning(
+                    self._parent,
+                    t.msg_download_failed_title,
+                    str(exc),
+                )
+            return
+
+        self._download_progress_timer.start()
+
         def do_download() -> tuple[UpdateOffer, str]:
             def on_progress(done: int, total: int) -> None:
-                self._dispatch_to_main(
-                    lambda d=done, tot=total: self._apply_download_progress(d, tot)
-                )
+                self._download_bytes_done = done
+                if total > 0:
+                    self._download_bytes_total = total
 
             path = download_update(
                 offer,
@@ -315,6 +530,8 @@ class UpdateController(QObject):
         """用户关闭进度窗：取消下载/安装并恢复主界面。"""
         if self._ignore_progress_close or self._install_launched:
             return
+        self._stop_download_progress_timer()
+        self._abort_curl_download()
         if not self._cancel_requested:
             self._cancel_requested = True
             self._append_log(get_update_texts(self._settings.language).log_cancelled)
@@ -322,6 +539,10 @@ class UpdateController(QObject):
         self._end_flow_unlock()
 
     def _on_download_finished(self, result: tuple[UpdateOffer, str]) -> None:
+        self._stop_download_progress_timer()
+        self._curl_proc = None
+        self._curl_offer = None
+        self._download_dest = None
         if self._cancel_requested:
             self._cleanup_progress_dialog()
             self._end_flow_unlock()
@@ -329,13 +550,29 @@ class UpdateController(QObject):
         offer, path_str = result
         t = get_update_texts(self._settings.language)
         self._append_log(t.log_download_done.format(path=path_str))
-
-        if self._progress:
-            self._progress.set_install_phase(t.install_background_detail)
-        self._append_log(t.log_install_background)
+        if self._download_bytes_total > 0:
+            self._download_bytes_done = self._download_bytes_total
+        self._apply_download_progress(self._download_bytes_done, self._download_bytes_total)
 
         package_path = get_updates_dir() / offer.asset_name
+        install_detail = t.install_background_detail
+        if sys.platform == "darwin":
+            target = macos_install_target_app()
+            install_detail = t.install_background_detail_macos.format(
+                path=target,
+                dmg_path=package_path,
+            )
+            self._append_log(t.log_install_macos_target.format(path=target))
+            self._append_log(t.log_download_saved.format(path=package_path))
+        if self._progress:
+            self._progress.set_install_phase(install_detail)
+        self._append_log(t.log_install_background)
+
         try:
+            if sys.platform == "darwin":
+                expected = int(offer.asset_size or self._download_bytes_total or 0)
+                verify_macos_dmg_download(package_path, expected_size=expected)
+                reveal_path_in_finder(package_path)
             launch_apply_after_quit(package_path)
             self._install_launched = True
             self._append_log(t.log_install_quit)
@@ -350,6 +587,10 @@ class UpdateController(QObject):
             )
 
     def _on_download_worker_error(self, err: str) -> None:
+        self._stop_download_progress_timer()
+        self._abort_curl_download()
+        self._curl_offer = None
+        self._download_dest = None
         self._cleanup_progress_dialog()
         t = get_update_texts(self._settings.language)
         if "UpdateDownloadCancelled" in err or "用户已取消" in err or "cancelled" in err.lower():
@@ -384,6 +625,10 @@ class UpdateController(QObject):
 
     def _quit_for_install(self) -> None:
         """关闭所有顶层窗口并结束事件循环，便于后台 bat 静默安装后拉起新版本。"""
+        self._abort_curl_download()
+        pause_bg = getattr(self._parent, "pause_background_tasks_for_update", None)
+        if callable(pause_bg):
+            pause_bg()
         self._cleanup_progress_dialog()
         app = QApplication.instance()
         if not app:

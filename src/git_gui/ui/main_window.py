@@ -434,6 +434,8 @@ class MainWindow(QMainWindow):
         """
         if not self.current_project_path:
             return
+        if self._update_flow_locked:
+            return
         if self._is_git_operation_running():
             return
         if self._auto_refresh_busy:
@@ -469,6 +471,8 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_worker_finished(self, payload: object) -> None:
         """自动刷新 git 采集完成，在主线程合并到模型并刷新表格。"""
         self._auto_refresh_busy = False
+        if self._update_flow_locked:
+            return
         if not isinstance(payload, tuple) or len(payload) != 4:
             return
         kind, path, removed, rows = payload
@@ -529,6 +533,8 @@ class MainWindow(QMainWindow):
 
     def _on_auto_refresh_worker_failed(self, err: str) -> None:
         self._auto_refresh_busy = False
+        if self._update_flow_locked:
+            return
         write_error_log("自动刷新后台失败", err[:2000] if err else "")
 
     def _perform_switch(self, target_branch: str, stash: bool) -> None:
@@ -952,6 +958,23 @@ class MainWindow(QMainWindow):
         self.menuBar().setEnabled(not locked)
         if hasattr(self, "_action_check_update") and self._action_check_update:
             self._action_check_update.setEnabled(not locked)
+        if locked:
+            self.pause_background_tasks_for_update()
+        else:
+            self.resume_background_tasks_after_update()
+
+    def pause_background_tasks_for_update(self) -> None:
+        """更新流程期间暂停后台任务，避免 git 子进程与 curl 下载并发导致原生崩溃。"""
+        self._auto_refresh_timer.stop()
+        self._parallel_op_serial += 1
+        self._active_parallel_workers.clear()
+        self._active_stable_worker = None
+        self._kill_git_processes()
+
+    def resume_background_tasks_after_update(self) -> None:
+        """更新流程结束后恢复自动刷新定时器。"""
+        if not self._update_flow_locked:
+            self._auto_refresh_timer.start()
 
     def _schedule_on_main_thread(self, fn) -> None:
         """将任意可调用对象安全调度到主线程执行（供 UpdateController 等使用）。"""
