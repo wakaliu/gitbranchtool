@@ -1,6 +1,6 @@
 ; Inno Setup：香肠内部版（独立 AppId，避免覆盖公开版安装）。
 #define MyAppName "GitPullSwitchTool-Sausage"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "SausageDev"
 #define MyAppExeName "GitPullSwitchTool-Sausage.exe"
 
