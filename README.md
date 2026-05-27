@@ -94,7 +94,7 @@ chmod +x scripts/build_macos.sh scripts/build_macos_dual.sh
 packaging/
 ├── pyinstaller/            # PyInstaller .spec
 ├── windows/              # Inno Setup 脚本
-└── macos/                # DMG 封装脚本
+└── macos/                # DMG 封装（背景图 + 拖放到「应用程序」引导；`dmg_background.png` 可预生成）
 scripts/
 ├── build_windows.ps1
 ├── build_windows_dual.ps1
