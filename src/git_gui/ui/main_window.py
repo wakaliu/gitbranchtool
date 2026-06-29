@@ -10,13 +10,17 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from pathlib import Path
 import sys
 from typing import List
+import time
+import inspect
+import math
 
 from ..config.settings import Settings
 from ..config.constants import APP_VERSION
 from ..core.project_manager import ProjectManager
 from ..core.git_manager import GitManager
-from ..utils.logger import OperationLogger
-from ..utils.logger import write_error_log
+from ..core.git_clone import parse_clone_progress_percent
+from ..utils.logger import OperationLogger, write_error_log
+from ..utils.file_utils import normalize_repo_path_key
 from ..utils.thread_pool import ThreadPoolManager, Worker
 from ..models.project import Project
 from .components.project_panel import ProjectPanel
@@ -27,6 +31,7 @@ from .components.settings_dialog import SettingsDialog
 from .components.branch_favorite_dialog import BranchFavoriteDialog
 from .components.git_console_dialog import GitConsoleDialog
 from .components.clone_project_dialog import CloneProjectDialog
+from .components.slim_repo_dialog import SlimRepoDialog
 from ..core.update.update_controller import UpdateController
 from ..ui.i18n.update_texts import get_update_texts
 from .widgets.log_text_edit import LogTextEdit
@@ -66,6 +71,7 @@ class MainWindow(QMainWindow):
         self._auto_refresh_timer.setInterval(5 * 60 * 1000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_current_project_status)
         self._update_flow_locked = False
+        self._business_operation_locked = False
         self._update_controller = UpdateController(
             self,
             self._schedule_on_main_thread,
@@ -191,6 +197,7 @@ class MainWindow(QMainWindow):
         self.repo_panel.refresh_requested.connect(self._refresh_all)
         self.repo_panel.fetch_requested.connect(self._perform_fetch)
         self.repo_panel.order_changed.connect(self._on_repo_order_changed)
+        self.repo_panel.slim_requested.connect(self._show_slim_dialog)
 
         # 操作面板
         self.operation_panel.switch_requested.connect(self._perform_switch)
@@ -367,6 +374,136 @@ class MainWindow(QMainWindow):
         self.logger.end_operation(True, msg)
         self._update_workspace_header()
 
+    def _show_slim_dialog(self) -> None:
+        """打开仓库瘦身选择弹窗。"""
+        if self._is_git_operation_running():
+            QMessageBox.warning(self, "提示", "当前有 Git 操作进行中，请稍后再试。")
+            return
+        if not self.current_project_path:
+            QMessageBox.warning(self, "提示", "请先选择一个工程。")
+            return
+        project = self.project_manager.get_project_by_path(self.current_project_path)
+        if not project or not project.repositories:
+            QMessageBox.warning(self, "提示", "当前工程暂无仓库，请先刷新或重新添加工程。")
+            return
+        dialog = SlimRepoDialog(
+            self,
+            repositories=project.repositories,
+            project_root=project.path,
+        )
+        dialog.slim_confirmed.connect(self._perform_slim)
+        dialog.exec()
+
+    def _perform_slim(self, repo_paths: List[Path]) -> None:
+        """对选中仓库执行 re-clone 瘦身（仅保留当前分支）。"""
+        if not repo_paths:
+            return
+        if self.current_project_path:
+            root_key = normalize_repo_path_key(self.current_project_path)
+            repo_paths = [p for p in repo_paths if normalize_repo_path_key(p) != root_key]
+        if not repo_paths:
+            QMessageBox.warning(self, "提示", "工程根目录不支持瘦身，请仅选择子仓库。")
+            return
+        self._set_business_ui_locked(True)
+        paths = list(repo_paths)
+
+        def unlock_and_refresh() -> None:
+            self._set_business_ui_locked(False)
+            try:
+                self.project_manager.refresh_sync_state_for_paths(paths)
+                if self.current_project_path:
+                    for proj in self.project_manager.projects:
+                        if proj.path == self.current_project_path:
+                            self.repo_panel.load_repositories(proj.repositories)
+                            break
+            except Exception as e:
+                write_error_log("瘦身后刷新同步列", str(e))
+
+        self._run_parallel_git_operation(
+            operation_name="瘦身",
+            repo_paths=paths,
+            per_repo_fn=self._slim_single_repo,
+            write_result_to_panel=True,
+            force_stable_serial=True,
+            enable_step_logs=True,
+            progress_hint="瘦身进行中，详情见下方运行日志。",
+            finally_callback=unlock_and_refresh,
+        )
+
+    def _slim_single_repo(self, path: Path, on_step=None) -> str:
+        """执行单个仓库瘦身，并通过 on_step 回传步骤日志。"""
+
+        def relay(message: str) -> None:
+            if on_step:
+                on_step(message)
+
+        return self.git_manager.slim_repo(path, callback=relay)
+
+    @staticmethod
+    def _format_eta_seconds(seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds} 秒"
+        minutes, sec = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes} 分 {sec} 秒"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours} 小时 {minutes} 分"
+
+    def _handle_step_log_progress(
+        self,
+        progress: OperationProgressDialog,
+        total: int,
+        index: int,
+        path: Path,
+        state: dict,
+        message: str,
+    ) -> None:
+        """瘦身/长任务步骤日志与细粒度进度、预计剩余时间。"""
+        now = time.time()
+        repo_start = state.get("repo_start", now)
+        elapsed_repo = max(0.0, now - repo_start)
+        durations: list[float] = state.setdefault("repo_durations", [])
+        avg = sum(durations) / len(durations) if durations else max(elapsed_repo, 120.0)
+        clone_map: dict[int, float] = state.setdefault("clone_percent_by_index", {})
+        heartbeat_logs: dict[int, int] = state.setdefault("last_heartbeat_log", {})
+
+        parsed_pct = parse_clone_progress_percent(message)
+        if parsed_pct is not None:
+            clone_map[index] = parsed_pct / 100.0
+
+        is_heartbeat = "clone 进行中" in message
+        if parsed_pct is not None or not is_heartbeat:
+            self.logger.append(f"[{path.name}] {message}")
+        elif int(elapsed_repo) - heartbeat_logs.get(index, -30) >= 30:
+            self.logger.append(f"[{path.name}] {message}")
+            heartbeat_logs[index] = int(elapsed_repo)
+
+        if index in clone_map and clone_map[index] > 0:
+            sub_fraction = clone_map[index]
+        elif is_heartbeat or "执行 clone" in message:
+            # 无 git 百分比输出时用渐近曲线，避免长期停在 95%
+            sub_fraction = 1.0 - math.exp(-elapsed_repo / max(avg * 2.0, 300.0))
+            sub_fraction = min(0.99, sub_fraction)
+        else:
+            sub_fraction = min(0.15, elapsed_repo / max(avg, 30.0) * 0.15)
+
+        overall_fraction = ((index - 1) + sub_fraction) / max(total, 1)
+        repo_estimate = max(avg, elapsed_repo * 1.05)
+        current_left = max(0.0, repo_estimate - elapsed_repo)
+        remaining_repos = max(0, total - index)
+        eta_seconds = int(current_left + avg * remaining_repos)
+        eta_text = self._format_eta_seconds(eta_seconds)
+        elapsed_text = self._format_eta_seconds(int(elapsed_repo))
+        status = (
+            f"{index}/{total} - {path.name} | 已用时 {elapsed_text} | 预计剩余约 {eta_text}"
+        )
+        if parsed_pct is not None:
+            status += f" | clone {parsed_pct}%"
+        elif is_heartbeat:
+            status += f" | clone 进行中"
+        progress.update_progress_fraction(overall_fraction, status)
+
     def _perform_fetch(self, repo_paths: List[Path]) -> None:
         self._run_parallel_git_operation(
             operation_name="Fetch",
@@ -437,7 +574,7 @@ class MainWindow(QMainWindow):
         """
         if not self.current_project_path:
             return
-        if self._update_flow_locked:
+        if self._update_flow_locked or self._business_operation_locked:
             return
         if self._is_git_operation_running():
             return
@@ -565,6 +702,7 @@ class MainWindow(QMainWindow):
             repo_paths=selected,
             per_repo_fn=lambda path: self.git_manager.switch(path, target_branch, stash),
             write_result_to_panel=True,
+            force_stable_serial=True,
         )
 
     def _run_parallel_git_operation(
@@ -573,6 +711,10 @@ class MainWindow(QMainWindow):
         repo_paths: List[Path],
         per_repo_fn,
         write_result_to_panel: bool = False,
+        finally_callback=None,
+        progress_hint: str | None = None,
+        force_stable_serial: bool = False,
+        enable_step_logs: bool = False,
     ) -> None:
         """统一执行 Git 操作。
 
@@ -583,9 +725,23 @@ class MainWindow(QMainWindow):
             return
         self.operation_panel.clear_result()
 
-        if write_result_to_panel:
-            self._run_switch_operation_stable(operation_name, repo_paths, per_repo_fn)
+        if write_result_to_panel and force_stable_serial:
+            self._run_switch_operation_stable(
+                operation_name,
+                repo_paths,
+                per_repo_fn,
+                finally_callback=finally_callback,
+                progress_hint=progress_hint,
+                enable_step_logs=enable_step_logs,
+            )
             return
+
+        def invoke_finally() -> None:
+            if finally_callback:
+                try:
+                    finally_callback()
+                except Exception as e:
+                    write_error_log("操作收尾回调异常", str(e))
 
         total = len(repo_paths)
         self._parallel_op_serial += 1
@@ -654,12 +810,14 @@ class MainWindow(QMainWindow):
                 safe_close_parallel_progress()
                 self.operation_panel.reset_switch_button()
                 self._active_parallel_workers.clear()
+                invoke_finally()
             except Exception as e:
                 write_error_log("finalize 异常", f"{operation_name}: {e}")
                 try:
                     safe_close_parallel_progress()
                     self.operation_panel.reset_switch_button()
                     self._active_parallel_workers.clear()
+                    invoke_finally()
                 except Exception:
                     pass
 
@@ -740,6 +898,7 @@ class MainWindow(QMainWindow):
                     pass
                 safe_close_parallel_progress()
                 self.operation_panel.reset_switch_button()
+                invoke_finally()
 
             QTimer.singleShot(0, finish_cancel_ui)
 
@@ -761,21 +920,31 @@ class MainWindow(QMainWindow):
             self._active_parallel_workers.append(worker)
             self.thread_pool.start(worker)
 
-    def _run_switch_operation_stable(self, operation_name: str, repo_paths: List[Path], per_repo_fn) -> None:
+    def _run_switch_operation_stable(
+        self,
+        operation_name: str,
+        repo_paths: List[Path],
+        per_repo_fn,
+        finally_callback=None,
+        progress_hint: str | None = None,
+        enable_step_logs: bool = False,
+    ) -> None:
         """一键切线稳定串行模式：单个后台Worker顺序执行所有仓库，主线程统一更新UI。
 
         这避免了并行时多个Worker同时回调导致的Qt事件风暴、33%卡住或闪退。
         每个仓库仍会显示进度和日志，适合长时间git操作。
         """
         total = len(repo_paths)
-        state = {"done": False, "cancelled": False, "progress_closed": False}
+        state = {"done": False, "cancelled": False, "progress_closed": False, "repo_durations": []}
+        accepts_step = enable_step_logs and len(inspect.signature(per_repo_fn).parameters) >= 2
         self.logger.clear()
         self.logger.start_operation(f"{operation_name} ({total} 个仓库)")
         progress = OperationProgressDialog(self, f"正在执行: {operation_name}")
         progress.setWindowModality(Qt.WindowModal)
         progress.update_progress(0, total, f"准备开始，目标仓库: {total}")
         self.operation_panel.btn_switch.setEnabled(False)
-        self.operation_panel.update_result("切线进行中，汇总结果将在完成后显示在此处；详情见下方运行日志。", True)
+        hint = progress_hint or "切线进行中，汇总结果将在完成后显示在此处；详情见下方运行日志。"
+        self.operation_panel.update_result(hint, True)
         write_error_log("稳定串行模式", f"启用切线稳定模式: repos={total}")
 
         def safe_close_progress(*, rejected: bool = False) -> None:
@@ -810,19 +979,33 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        def invoke_finally() -> None:
+            if finally_callback:
+                try:
+                    finally_callback()
+                except Exception as e:
+                    write_error_log("操作收尾回调异常", str(e))
+
         def on_stable_cancel() -> None:
             state["cancelled"] = True
             self._kill_git_processes()
             self.logger.append("用户取消切线，正在终止 git 进程…")
             safe_close_progress(rejected=True)
             self.operation_panel.reset_switch_button()
+            invoke_finally()
 
         progress.canceled.connect(on_stable_cancel)
 
         def emit_progress(index: int, path: Path, ok: bool, text: str) -> None:
             if state["done"]:
                 return
-            progress.update_progress(index, total, f"{index}/{total} - {path.name}")
+            if enable_step_logs:
+                progress.update_progress_fraction(
+                    index / max(total, 1),
+                    f"{index}/{total} - {path.name} 完成",
+                )
+            else:
+                progress.update_progress(index, total, f"{index}/{total} - {path.name}")
             preview = "操作完成"
             if text and text.strip():
                 for line in text.splitlines():
@@ -883,6 +1066,7 @@ class MainWindow(QMainWindow):
                 self._active_stable_worker = None
                 safe_close_progress()
                 self.operation_panel.reset_switch_button()
+                invoke_finally()
 
         def on_fail(err):
             err_head = err.splitlines()[0] if err else "未知错误"
@@ -896,6 +1080,7 @@ class MainWindow(QMainWindow):
             self._active_stable_worker = None
             safe_close_progress()
             self.operation_panel.reset_switch_button()
+            invoke_finally()
 
         def run_all_with_cancel_check():
             """包装run_all，支持在循环中检查取消状态并提前退出。"""
@@ -907,9 +1092,27 @@ class MainWindow(QMainWindow):
                     )
                     break
                 try:
-                    # 每个仓库前强制unlock
+                    state["repo_start"] = time.time()
+                    state.setdefault("clone_percent_by_index", {}).pop(index, None)
+                    state.setdefault("last_heartbeat_log", {}).pop(index, None)
                     self.git_manager._unlock_git(path)
-                    output = per_repo_fn(path)
+
+                    def make_step_cb(p=path, i=index):
+                        def step_cb(msg: str) -> None:
+                            if not accepts_step:
+                                return
+                            self.dispatch_to_main.emit(
+                                lambda m=msg, rp=p, idx=i: self._handle_step_log_progress(
+                                    progress, total, idx, rp, state, m
+                                )
+                            )
+                        return step_cb
+
+                    if accepts_step:
+                        output = per_repo_fn(path, make_step_cb())
+                    else:
+                        output = per_repo_fn(path)
+                    state["repo_durations"].append(time.time() - state["repo_start"])
                     results.append((path, True, output, index))
                     self.dispatch_to_main.emit(
                         lambda i=index, p=path, t=output: emit_progress(i, p, True, t)
@@ -952,15 +1155,24 @@ class MainWindow(QMainWindow):
             write_error_log("取消杀进程异常", str(e))
             self.logger.append("取消操作完成（进程终止可能不完全）")
 
-    def set_update_flow_locked(self, locked: bool) -> None:
-        """更新下载/安装期间禁用业务操作，保留窗口最小化/最大化/关闭。"""
-        self._update_flow_locked = locked
+    def _set_business_ui_locked(self, locked: bool) -> None:
+        """禁用中央区域与菜单栏业务操作，保留窗口最小化/最大化/关闭。"""
+        self._business_operation_locked = locked
+        self._apply_business_ui_enabled()
+
+    def _apply_business_ui_enabled(self) -> None:
+        locked = self._update_flow_locked or self._business_operation_locked
         central = self.centralWidget()
         if central:
             central.setEnabled(not locked)
         self.menuBar().setEnabled(not locked)
         if hasattr(self, "_action_check_update") and self._action_check_update:
-            self._action_check_update.setEnabled(not locked)
+            self._action_check_update.setEnabled(not self._update_flow_locked)
+
+    def set_update_flow_locked(self, locked: bool) -> None:
+        """更新下载/安装期间禁用业务操作，保留窗口最小化/最大化/关闭。"""
+        self._update_flow_locked = locked
+        self._apply_business_ui_enabled()
         if locked:
             self.pause_background_tasks_for_update()
         else:

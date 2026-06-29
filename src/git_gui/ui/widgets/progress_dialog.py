@@ -21,6 +21,7 @@ class OperationProgressDialog(QProgressDialog):
         self.setAutoClose(False)
         self.setAutoReset(False)
         self.setCancelButtonText("取消")
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         self.setLabelText("正在处理 Git 操作，请稍候...")
 
         # 自定义标签显示更多信息
@@ -42,6 +43,14 @@ class OperationProgressDialog(QProgressDialog):
             return
         self.setRange(0, total)
         self.setValue(min(completed, total))
+        if message:
+            self.update_status(message)
+
+    def update_progress_fraction(self, fraction: float, message: str = "") -> None:
+        """以 0.0–1.0 比例更新进度，适用于单仓库长时间子任务。"""
+        clamped = min(1.0, max(0.0, fraction))
+        self.setRange(0, 1000)
+        self.setValue(int(clamped * 1000))
         if message:
             self.update_status(message)
 

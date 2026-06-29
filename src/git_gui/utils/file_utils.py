@@ -5,10 +5,12 @@
 from pathlib import Path
 from typing import List, Optional
 import os
+import platform
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .subprocess_helpers import subprocess_git_command_kwargs
+from .subprocess_helpers import subprocess_git_command_kwargs, subprocess_hide_console_kwargs
 
 def is_git_repository(path: Path) -> bool:
     """判断目录是否为有效 Git 仓库。
@@ -113,6 +115,244 @@ def get_sync_status(repo_path: Path) -> tuple[str, int, int]:
         return ("diverged", ahead, behind)
     except Exception:
         return ("unknown", 0, 0)
+
+
+def get_remote_url(repo_path: Path) -> str:
+    """读取 origin 远程 URL，失败时返回空字符串。
+
+    Args:
+        repo_path: 仓库根目录。
+
+    Returns:
+        origin 远程地址；未配置或命令失败时为空字符串。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            **subprocess_git_command_kwargs(),
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def normalize_repo_path_key(path: Path | str) -> str:
+    """统一仓库路径键，避免 Windows 下大小写/斜杠差异导致合计统计遗漏。"""
+    try:
+        return os.path.normcase(str(Path(path).resolve()))
+    except (OSError, RuntimeError):
+        return os.path.normcase(str(Path(path)))
+
+
+def _as_scan_path(path: Path) -> Path:
+    """Windows 长路径仓库需加 ``\\\\?\\`` 前缀，否则深层目录统计可能漏计为 0。"""
+    if os.name != "nt":
+        return path
+    try:
+        resolved = str(path.resolve())
+    except (OSError, RuntimeError):
+        resolved = str(path)
+    if resolved.startswith("\\\\?\\"):
+        return Path(resolved)
+    if resolved.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + resolved[2:])
+    return Path("\\\\?\\" + resolved)
+
+
+def _get_directory_size_scandir(path: Path) -> int:
+    """基于 scandir 的跨平台目录体积统计。"""
+    scan_path = _as_scan_path(path)
+    if not scan_path.exists() and not path.exists():
+        return 0
+    if not scan_path.exists():
+        scan_path = path
+    total = 0
+    stack = [scan_path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                    except (OSError, PermissionError):
+                        continue
+        except (OSError, PermissionError):
+            continue
+    return total
+
+
+def _path_has_entries(path: Path) -> bool:
+    """快速判断目录是否非空，用于校验平台统计结果。"""
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is not None
+    except (OSError, PermissionError):
+        return False
+
+
+def _get_directory_size_powershell(path: Path) -> int:
+    """Windows 下通过 PowerShell 聚合文件大小，大目录通常比纯 Python 遍历更快。"""
+    env = os.environ.copy()
+    env["GT_SIZE_PATH"] = str(path)
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "$p = $env:GT_SIZE_PATH; "
+                "if (-not (Test-Path -LiteralPath $p)) { Write-Output 0; exit 0 }; "
+                "$sum = (Get-ChildItem -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue | "
+                "Measure-Object -Property Length -Sum).Sum; "
+                "if ($null -eq $sum) { Write-Output 0 } else { Write-Output ([int64]$sum) }",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+            env=env,
+            **subprocess_hide_console_kwargs(),
+        )
+        if result.returncode != 0:
+            return _get_directory_size_scandir(path)
+        value = (result.stdout or "").strip().splitlines()
+        raw = value[-1].strip() if value else ""
+        if not raw or raw.lower() in {"nan", "none"}:
+            if _path_has_entries(path):
+                return _get_directory_size_scandir(path)
+            return 0
+        size = int(float(raw))
+        if size <= 0 and _path_has_entries(path):
+            return _get_directory_size_scandir(path)
+        return size
+    except Exception:
+        return _get_directory_size_scandir(path)
+
+
+def _get_directory_size_du(path: Path) -> int:
+    """Unix 下使用 du 快速统计目录体积。"""
+    system = platform.system().lower()
+    if system == "darwin":
+        cmd = ["du", "-sk", str(path)]
+        multiplier = 1024
+    else:
+        cmd = ["du", "-sb", str(path)]
+        multiplier = 1
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+            **subprocess_git_command_kwargs(),
+        )
+        if result.returncode != 0:
+            return _get_directory_size_scandir(path)
+        parts = (result.stdout or "").strip().split()
+        if not parts:
+            if _path_has_entries(path):
+                return _get_directory_size_scandir(path)
+            return 0
+        size = int(parts[0]) * multiplier
+        if size <= 0 and _path_has_entries(path):
+            return _get_directory_size_scandir(path)
+        return size
+    except Exception:
+        return _get_directory_size_scandir(path)
+
+
+def get_directory_size(path: Path) -> int:
+    """统计目录占用字节数。
+
+    Unity 工程常含父子嵌套 Git 仓库，并行扫描会导致 IO 争用并出现 0 B 或严重偏小；
+    统一使用 scandir 逐文件累加，并在 Windows 上启用长路径前缀。
+
+    Args:
+        path: 待统计目录。
+
+    Returns:
+        目录总字节数；路径不存在时返回 0。
+    """
+    if not path.exists():
+        return 0
+    size = _get_directory_size_scandir(path)
+    if size <= 0 and _path_has_entries(path):
+        size = _get_directory_size_scandir(path.resolve())
+    return size
+
+
+def get_directory_sizes_parallel(
+    paths: List[Path],
+    max_workers: int = 4,
+    cancel_check=None,
+) -> dict[str, int]:
+    """并行统计多个目录的磁盘占用。
+
+    Args:
+        paths: 待统计目录列表。
+        max_workers: 最大并发线程数。
+        cancel_check: 返回 True 时停止提交新任务并尽快结束。
+
+    Returns:
+        路径字符串到字节数的映射。
+    """
+    if not paths:
+        return {}
+    workers = max(1, min(max_workers, len(paths)))
+    results: dict[str, int] = {}
+
+    def _scan_one(target: Path) -> tuple[str, int]:
+        return str(target), get_directory_size(target)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_scan_one, path): path for path in paths}
+        for future in as_completed(futures):
+            if cancel_check and cancel_check():
+                for pending in futures:
+                    pending.cancel()
+                break
+            try:
+                key, size = future.result()
+                results[key] = size
+            except Exception:
+                path = futures[future]
+                results[str(path)] = 0
+    return results
+
+
+def format_bytes(size: int) -> str:
+    """将字节数格式化为人类可读字符串。
+
+    Args:
+        size: 字节数。
+
+    Returns:
+        如 ``1.2 GB``、``450 MB``；负数按 0 处理。
+    """
+    value = max(0, int(size))
+    units = ("B", "KB", "MB", "GB", "TB")
+    if value < 1024:
+        return f"{value} B"
+    unit_index = 0
+    scaled = float(value)
+    while scaled >= 1024 and unit_index < len(units) - 1:
+        scaled /= 1024
+        unit_index += 1
+    if unit_index <= 1:
+        return f"{scaled:.0f} {units[unit_index]}"
+    return f"{scaled:.1f} {units[unit_index]}"
 
 
 def get_last_commit_timestamp(repo_path: Path) -> Optional[float]:

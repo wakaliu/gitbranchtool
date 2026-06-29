@@ -59,6 +59,7 @@ class Settings:
                 "switch_force": True,
                 "auto_unlock": True,
                 "switch_max_stash_files": 500,
+                "slim_shallow": False,
             },
             "ui": {
                 "log_max_lines": LOG_MAX_LINES,

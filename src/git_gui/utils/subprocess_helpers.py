@@ -58,7 +58,8 @@ def _darwin_git_child_environ() -> Optional[dict[str, str]]:
 def subprocess_git_command_kwargs() -> dict[str, Any]:
     """调用系统 ``git`` 子进程时与 ``subprocess.run`` 合并的关键字（含 Windows 无窗口与 macOS PATH）。"""
     kw: dict[str, Any] = dict(subprocess_hide_console_kwargs())
-    darwin_env = _darwin_git_child_environ()
-    if darwin_env is not None:
-        kw["env"] = darwin_env
+    env = _darwin_git_child_environ() or dict(os.environ)
+    env["GIT_FLUSH"] = "1"
+    env["GIT_PROGRESS_DELAY"] = "0"
+    kw["env"] = env
     return kw

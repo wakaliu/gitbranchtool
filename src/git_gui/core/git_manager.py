@@ -11,9 +11,10 @@ import platform
 from typing import List, Dict, Optional, Callable
 from ..models.repository import GitRepository
 from ..config.settings import Settings
-from ..utils.file_utils import get_current_branch
+from ..utils.file_utils import get_current_branch, get_directory_size, get_remote_url, format_bytes
 from ..utils.logger import write_error_log
-from ..utils.subprocess_helpers import subprocess_git_command_kwargs
+from ..utils.subprocess_helpers import subprocess_git_command_kwargs, subprocess_hide_console_kwargs
+from .git_clone import build_clone_command, remove_existing_path, run_clone_process
 
 class GitManager:
     """Git 操作核心。
@@ -267,3 +268,72 @@ class GitManager:
             command = "git " + command.strip()
         args = command.split()[1:]  # 去掉 "git"
         return self._run_git(repo_path, args, timeout=60)
+
+    def slim_repo(self, repo_path: Path, callback: Optional[Callable[[str], None]] = None) -> str:
+        """通过 re-clone 仅保留当前分支，减小本地 .git 占用。
+
+        删除原目录后按 ``git.slim_shallow`` 配置重新 clone；无 origin 的本地仓库无法执行。
+
+        Args:
+            repo_path: 仓库根目录。
+            callback: 可选进度回调。
+
+        Returns:
+            含瘦身前后磁盘占用的摘要文本。
+
+        Raises:
+            RuntimeError: 缺少 origin、分支无效或 clone 失败。
+        """
+        branch = get_current_branch(repo_path)
+        if not branch or branch == "HEAD":
+            raise RuntimeError(f"{repo_path.name}: 无法确定当前分支，请先 checkout 到有效分支")
+
+        url = get_remote_url(repo_path)
+        if not url:
+            raise RuntimeError(f"{repo_path.name}: 未配置 origin 远程，无法 re-clone")
+
+        self._unlock_git(repo_path)
+        write_error_log("瘦身开始", f"repo={repo_path}\nbranch={branch}\nurl={url}")
+
+        if callback:
+            callback(f"正在瘦身 {repo_path.name}（分支 {branch}）...")
+
+        size_before = get_directory_size(repo_path)
+        if callback:
+            callback(f"当前占用 {format_bytes(size_before)}，准备删除并 re-clone...")
+
+        shallow = bool(self.settings.get("git.slim_shallow", False))
+        if callback:
+            mode = "浅克隆 (--depth 1)" if shallow else "partial clone (--filter=blob:none)"
+            callback(f"克隆模式：{mode}")
+
+        remove_existing_path(repo_path)
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = build_clone_command(url, repo_path, branch, shallow)
+        write_error_log("瘦身 clone", f"repo={repo_path}\ncmd={' '.join(cmd)}")
+        if callback:
+            callback(f"执行 clone：{' '.join(cmd)}")
+
+        ok, output = run_clone_process(
+            cmd,
+            line_callback=lambda line: callback(f"  {line}") if callback else None,
+            heartbeat_callback=lambda elapsed: callback(
+                f"clone 进行中... {elapsed}s"
+            ) if callback else None,
+        )
+        if not ok:
+            if callback and output:
+                callback(f"clone 失败：{output}")
+            raise RuntimeError(output or f"{repo_path.name}: clone 失败")
+
+        size_after = get_directory_size(repo_path)
+        saved = size_before - size_after
+        summary = (
+            f"{repo_path.name}: {format_bytes(size_before)} -> {format_bytes(size_after)} "
+            f"(节省 {format_bytes(saved)})"
+        )
+        write_error_log("瘦身结束", f"repo={repo_path}\n{summary}")
+        if callback:
+            callback(summary)
+        return summary

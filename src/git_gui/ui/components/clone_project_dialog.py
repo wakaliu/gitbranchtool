@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-import shutil
+import re
 import subprocess
 import threading
 import time
-import re
 from typing import Any
 
 import yaml
@@ -41,7 +40,14 @@ from ...utils.runtime_paths import (
     get_repository_root,
     is_pyinstaller_bundle,
 )
-from ...utils.subprocess_helpers import subprocess_git_command_kwargs, subprocess_hide_console_kwargs
+from ...core.git_clone import (
+    build_clone_command,
+    parse_clone_progress_percent,
+    remove_existing_path,
+    run_clone_process,
+    terminate_clone_process,
+)
+from ...utils.subprocess_helpers import subprocess_git_command_kwargs
 
 
 class CloneProjectDialog(QDialog):
@@ -374,21 +380,14 @@ class CloneProjectDialog(QDialog):
             if target.exists():
                 self.log_emitted.emit(f"[{index}/{total}] remove existing: {target}")
                 try:
-                    self._remove_existing_path(target)
+                    remove_existing_path(target)
                 except Exception as e:
                     failed += 1
                     self.log_emitted.emit(f"  FAIL: remove existing path failed - {e}")
                     self.progress_emitted.emit(index * 100, total * 100, target.name)
                     continue
             branch = self._resolve_branch(url, preferred_branch)
-            cmd = ["git", "clone", url, str(target)]
-            if shallow_clone:
-                cmd.extend(["--depth", "1"])
-            else:
-                # 全量模式使用 partial clone，避免预先下载全部 blob，checkout 时按需获取。
-                cmd.extend(["--filter=blob:none"])
-            if branch:
-                cmd.extend(["--branch", branch, "--single-branch"])
+            cmd = build_clone_command(url, target, branch, shallow_clone)
             self.log_emitted.emit(f"[{index}/{total}] {' '.join(cmd)}")
             ok, output = self._run_clone_process_streaming(cmd, index, total, job["name"])
             if self._cancel_requested:
@@ -414,106 +413,70 @@ class CloneProjectDialog(QDialog):
             self.primary_project_ready.emit(root_path)
         self.batch_finished.emit(success, summary)
 
-    def _remove_existing_path(self, target: Path) -> None:
-        """删除已存在目录，确保按用户预期重新克隆。"""
-        if target.is_file():
-            target.unlink(missing_ok=True)
-            return
-
-        def on_rm_error(func, path, exc_info):
-            try:
-                os.chmod(path, 0o777)
-                func(path)
-            except Exception as rm_err:
-                raise rm_err
-
-        shutil.rmtree(target, onerror=on_rm_error)
-
     def _run_clone_process_streaming(self, cmd: list[str], index: int, total: int, repo_name: str) -> tuple[bool, str]:
-        """流式执行 git clone，定期输出心跳日志，避免长时间无反馈。"""
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            **subprocess_git_command_kwargs(),
-        )
-        self._active_processes.append(process)
-        output_lines: list[str] = []
-        start_time = time.time()
-        last_heartbeat = 0.0
-        stop_reader = threading.Event()
-
+        """流式执行 git clone，将 git 原始输出写入日志并驱动进度条。"""
         repo_percent = 0
+        start_time = time.time()
+        last_git_status = ""
+        last_logged_key = ""
+        last_git_line_at = start_time
+        last_idle_log_at = 0
 
         def _emit_live_progress(elapsed_seconds: int) -> None:
             nonlocal repo_percent
-            inferred_percent = max(repo_percent, min(90, max(1, elapsed_seconds // 2)))
+            if repo_percent > 0:
+                inferred_percent = repo_percent
+            else:
+                inferred_percent = min(5, max(1, elapsed_seconds // 30))
             completed_scaled = (index - 1) * 100 + inferred_percent
-            self.progress_emitted.emit(completed_scaled, total * 100, f"{repo_name} {elapsed_seconds}s")
+            if last_git_status:
+                title = last_git_status
+            elif self.settings.language == "en":
+                title = f"{repo_name} waiting for git output... {elapsed_seconds}s"
+            else:
+                title = f"{repo_name} 等待 git 输出... {elapsed_seconds}s"
+            self.progress_emitted.emit(completed_scaled, total * 100, title)
 
-        def read_output_stream() -> None:
-            nonlocal repo_percent
-            if process.stdout is None:
+        def on_line(text: str) -> None:
+            nonlocal repo_percent, last_git_status, last_logged_key, last_git_line_at
+            last_git_line_at = time.time()
+            last_git_status = text if len(text) <= 96 else f"{text[:93]}..."
+            parsed = parse_clone_progress_percent(text)
+            if parsed is not None:
+                repo_percent = max(repo_percent, parsed)
+                _emit_live_progress(int(time.time() - start_time))
+            log_key_match = re.search(r"\((\d+)/(\d+)\)", text)
+            log_key = log_key_match.group(0) if log_key_match else text
+            if log_key == last_logged_key:
                 return
-            try:
-                for raw_line in iter(process.stdout.readline, ""):
-                    if stop_reader.is_set():
-                        break
-                    text = raw_line.strip()
-                    if not text:
-                        continue
-                    matched = re.search(r"(\d+)%", text)
-                    if matched:
-                        try:
-                            repo_percent = max(repo_percent, min(100, int(matched.group(1))))
-                        except ValueError:
-                            pass
-                    output_lines.append(text)
-                    if len(output_lines) > 30:
-                        output_lines[:] = output_lines[-30:]
-                    self.log_emitted.emit(f"    {text}")
-            except Exception:
-                pass
+            last_logged_key = log_key
+            self.log_emitted.emit(f"[git] {text}")
 
-        reader_thread = threading.Thread(target=read_output_stream, daemon=True)
-        reader_thread.start()
-        try:
-            while process.poll() is None:
-                if self._cancel_requested:
-                    self._terminate_process(process)
-                    stop_reader.set()
-                    reader_thread.join(timeout=1)
-                    return False, "cancelled"
-                now = time.time()
-                if now - last_heartbeat >= 2:
-                    elapsed = int(now - start_time)
-                    heartbeat = (
-                        f"[{index}/{total}] {repo_name} cloning... {elapsed}s"
-                        if self.settings.language == "en"
-                        else f"[{index}/{total}] {repo_name} 克隆中... {elapsed}秒"
-                    )
-                    self.log_emitted.emit(heartbeat)
-                    _emit_live_progress(elapsed)
-                    last_heartbeat = now
-                time.sleep(0.2)
-            stop_reader.set()
-            reader_thread.join(timeout=1)
-            rc = process.wait(timeout=5)
-            if rc == 0:
-                return True, ""
-            return False, (output_lines[-1] if output_lines else f"exit code {rc}")
-        except Exception as e:
-            self._terminate_process(process)
-            stop_reader.set()
-            reader_thread.join(timeout=1)
-            return False, str(e)
-        finally:
-            if process in self._active_processes:
-                self._active_processes.remove(process)
+        def on_heartbeat(elapsed: int) -> None:
+            nonlocal last_idle_log_at
+            _emit_live_progress(elapsed)
+            if time.time() - last_git_line_at < 30:
+                return
+            if elapsed - last_idle_log_at < 30:
+                return
+            last_idle_log_at = elapsed
+            idle_msg = (
+                f"[{index}/{total}] {repo_name} still running ({elapsed}s), no git output yet..."
+                if self.settings.language == "en"
+                else f"[{index}/{total}] {repo_name} 仍在运行（{elapsed}秒），暂未收到 git 输出..."
+            )
+            self.log_emitted.emit(idle_msg)
+
+        ok, output = run_clone_process(
+            cmd,
+            cancel_check=lambda: self._cancel_requested,
+            line_callback=on_line,
+            heartbeat_callback=on_heartbeat,
+            active_processes=self._active_processes,
+        )
+        if not ok and output == "cancelled":
+            return False, "cancelled"
+        return ok, output
 
     def _update_progress(self, completed: int, total: int, title: str) -> None:
         if total <= 0:
@@ -544,25 +507,7 @@ class CloneProjectDialog(QDialog):
 
     def _terminate_process(self, process: subprocess.Popen) -> None:
         """尽量完整终止 git clone 及其子进程。"""
-        try:
-            if process.poll() is not None:
-                return
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    **subprocess_hide_console_kwargs(),
-                )
-            else:
-                process.terminate()
-                process.wait(timeout=2)
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
+        terminate_clone_process(process)
 
     def _terminate_active_git_processes(self) -> None:
         for proc in list(self._active_processes):

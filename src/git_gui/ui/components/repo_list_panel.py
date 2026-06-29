@@ -89,6 +89,7 @@ class RepoListPanel(QWidget):
     switch_requested = Signal()             # 转到 OperationPanel 处理
     console_requested = Signal()
     order_changed = Signal(list)            # 当前顺序的仓库路径字符串列表
+    slim_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -127,8 +128,8 @@ class RepoListPanel(QWidget):
 
         self.btn_refresh.clicked.connect(self.refresh_requested.emit)
         self.btn_fetch.clicked.connect(self._on_fetch_clicked)
+        self.btn_slim.clicked.connect(self.slim_requested.emit)
         self.btn_select_all.clicked.connect(self._toggle_select_all)
-        # 其他按钮信号后续在 main_window 连接
 
         layout.addWidget(menu_frame)
 

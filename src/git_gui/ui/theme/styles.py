@@ -65,6 +65,27 @@ def build_app_stylesheet(theme_name: str) -> str:
         padding: 2px 8px;
         font-size: 11px;
     }}
+    QPushButton[role="dialog-action"] {{
+        min-height: 36px;
+        max-height: 36px;
+        padding: 6px 12px;
+        font-size: {t.font_body}px;
+        font-weight: 600;
+    }}
+    QPushButton[role="dialog-action-primary"] {{
+        background-color: {t.primary};
+        color: #FFFFFF;
+        border-color: {t.primary};
+        min-height: 36px;
+        max-height: 36px;
+        padding: 6px 12px;
+        font-size: {t.font_body}px;
+        font-weight: 700;
+    }}
+    QPushButton[role="dialog-action-primary"]:hover {{
+        background-color: {t.primary_hover};
+        border-color: {t.primary_hover};
+    }}
     QPushButton:hover {{
         border-color: {t.primary};
     }}
