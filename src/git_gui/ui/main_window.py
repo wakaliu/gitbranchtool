@@ -18,7 +18,7 @@ from ..config.settings import Settings
 from ..config.constants import APP_VERSION
 from ..core.project_manager import ProjectManager
 from ..core.git_manager import GitManager
-from ..core.git_clone import parse_clone_progress_percent
+from ..core.git_clone import parse_clone_progress_percent, CloneOutputThrottle
 from ..utils.logger import OperationLogger, write_error_log
 from ..utils.file_utils import normalize_repo_path_key
 from ..utils.thread_pool import ThreadPoolManager, Worker
@@ -430,14 +430,14 @@ class MainWindow(QMainWindow):
             finally_callback=unlock_and_refresh,
         )
 
-    def _slim_single_repo(self, path: Path, on_step=None) -> str:
+    def _slim_single_repo(self, path: Path, on_step=None, cancel_check=None) -> str:
         """执行单个仓库瘦身，并通过 on_step 回传步骤日志。"""
 
         def relay(message: str) -> None:
             if on_step:
                 on_step(message)
 
-        return self.git_manager.slim_repo(path, callback=relay)
+        return self.git_manager.slim_repo(path, callback=relay, cancel_check=cancel_check)
 
     @staticmethod
     def _format_eta_seconds(seconds: int) -> str:
@@ -458,26 +458,32 @@ class MainWindow(QMainWindow):
         path: Path,
         state: dict,
         message: str,
+        *,
+        update_log: bool = True,
+        update_progress: bool = True,
     ) -> None:
         """瘦身/长任务步骤日志与细粒度进度、预计剩余时间。"""
+        if state.get("cancelled") or state.get("done"):
+            return
         now = time.time()
         repo_start = state.get("repo_start", now)
         elapsed_repo = max(0.0, now - repo_start)
         durations: list[float] = state.setdefault("repo_durations", [])
         avg = sum(durations) / len(durations) if durations else max(elapsed_repo, 120.0)
         clone_map: dict[int, float] = state.setdefault("clone_percent_by_index", {})
-        heartbeat_logs: dict[int, int] = state.setdefault("last_heartbeat_log", {})
 
         parsed_pct = parse_clone_progress_percent(message)
         if parsed_pct is not None:
             clone_map[index] = parsed_pct / 100.0
 
         is_heartbeat = "clone 进行中" in message
-        if parsed_pct is not None or not is_heartbeat:
+        if update_log and (parsed_pct is not None or not is_heartbeat):
             self.logger.append(f"[{path.name}] {message}")
-        elif int(elapsed_repo) - heartbeat_logs.get(index, -30) >= 30:
+        elif update_log and is_heartbeat:
             self.logger.append(f"[{path.name}] {message}")
-            heartbeat_logs[index] = int(elapsed_repo)
+
+        if not update_progress:
+            return
 
         if index in clone_map and clone_map[index] > 0:
             sub_fraction = clone_map[index]
@@ -501,8 +507,11 @@ class MainWindow(QMainWindow):
         if parsed_pct is not None:
             status += f" | clone {parsed_pct}%"
         elif is_heartbeat:
-            status += f" | clone 进行中"
-        progress.update_progress_fraction(overall_fraction, status)
+            status += " | clone 进行中"
+        try:
+            progress.update_progress_fraction(overall_fraction, status)
+        except RuntimeError:
+            pass
 
     def _perform_fetch(self, repo_paths: List[Path]) -> None:
         self._run_parallel_git_operation(
@@ -943,9 +952,9 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModal)
         progress.update_progress(0, total, f"准备开始，目标仓库: {total}")
         self.operation_panel.btn_switch.setEnabled(False)
-        hint = progress_hint or "切线进行中，汇总结果将在完成后显示在此处；详情见下方运行日志。"
+        hint = progress_hint or f"{operation_name}进行中，汇总结果将在完成后显示在此处；详情见下方运行日志。"
         self.operation_panel.update_result(hint, True)
-        write_error_log("稳定串行模式", f"启用切线稳定模式: repos={total}")
+        write_error_log("稳定串行模式", f"启用稳定串行模式: op={operation_name} repos={total}")
 
         def safe_close_progress(*, rejected: bool = False) -> None:
             if state.get("progress_closed"):
@@ -989,7 +998,7 @@ class MainWindow(QMainWindow):
         def on_stable_cancel() -> None:
             state["cancelled"] = True
             self._kill_git_processes()
-            self.logger.append("用户取消切线，正在终止 git 进程…")
+            self.logger.append(f"用户取消{operation_name}，正在终止 git 进程…")
             safe_close_progress(rejected=True)
             self.operation_panel.reset_switch_button()
             invoke_finally()
@@ -1020,9 +1029,9 @@ class MainWindow(QMainWindow):
                 ok,
             )
             if ok:
-                self.logger.append(f"--- [{path.name}] 切线成功 ---")
+                self.logger.append(f"--- [{path.name}] {operation_name}成功 ---")
             else:
-                self.logger.append(f"--- [{path.name}] 切线失败 ---")
+                self.logger.append(f"--- [{path.name}] {operation_name}失败 ---")
             if text and text.strip():
                 for line in text.strip().splitlines():
                     stripped = line.strip()
@@ -1076,7 +1085,7 @@ class MainWindow(QMainWindow):
                     if line.strip():
                         self.logger.append(f"  {line.strip()}")
             self.logger.end_operation(False)
-            self.operation_panel.update_result(f"一键切线执行异常：{err_head}", False)
+            self.operation_panel.update_result(f"{operation_name}执行异常：{err_head}", False)
             self._active_stable_worker = None
             safe_close_progress()
             self.operation_panel.reset_switch_button()
@@ -1094,22 +1103,43 @@ class MainWindow(QMainWindow):
                 try:
                     state["repo_start"] = time.time()
                     state.setdefault("clone_percent_by_index", {}).pop(index, None)
-                    state.setdefault("last_heartbeat_log", {}).pop(index, None)
+                    throttles: dict[int, CloneOutputThrottle] = state.setdefault("clone_throttles", {})
+                    throttles.pop(index, None)
                     self.git_manager._unlock_git(path)
 
                     def make_step_cb(p=path, i=index):
                         def step_cb(msg: str) -> None:
                             if not accepts_step:
                                 return
+                            if state.get("cancelled"):
+                                return
+                            is_heartbeat = "clone 进行中" in msg
+                            is_git_line = msg.startswith("  ")
+                            if is_git_line or is_heartbeat:
+                                throttle = throttles.setdefault(i, CloneOutputThrottle())
+                                if is_heartbeat:
+                                    should_log, should_progress = throttle.on_heartbeat()
+                                else:
+                                    should_log, should_progress = throttle.on_git_line(msg.strip())
+                                if not should_log and not should_progress:
+                                    return
+                            else:
+                                should_log = True
+                                should_progress = True
                             self.dispatch_to_main.emit(
-                                lambda m=msg, rp=p, idx=i: self._handle_step_log_progress(
-                                    progress, total, idx, rp, state, m
+                                lambda m=msg, rp=p, idx=i, sl=should_log, sp=should_progress: self._handle_step_log_progress(
+                                    progress, total, idx, rp, state, m,
+                                    update_log=sl, update_progress=sp,
                                 )
                             )
                         return step_cb
 
                     if accepts_step:
-                        output = per_repo_fn(path, make_step_cb())
+                        cancel_fn = lambda: state.get("cancelled", False)
+                        if len(inspect.signature(per_repo_fn).parameters) >= 3:
+                            output = per_repo_fn(path, make_step_cb(), cancel_fn)
+                        else:
+                            output = per_repo_fn(path, make_step_cb())
                     else:
                         output = per_repo_fn(path)
                     state["repo_durations"].append(time.time() - state["repo_start"])

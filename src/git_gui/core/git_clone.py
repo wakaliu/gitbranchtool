@@ -10,32 +10,265 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from ..utils.subprocess_helpers import subprocess_git_command_kwargs, subprocess_hide_console_kwargs
 
 
+@dataclass
+class CloneOutputThrottle:
+    """限制 git clone 输出映射到 UI 的频率，避免长时间 clone 时 Qt 事件队列膨胀导致闪退。
+
+    clone 对话框与瘦身流程共用：在后台线程侧丢弃冗余 dispatch，而非在主线程排队后再忽略。
+    """
+
+    min_progress_interval: float = 0.5
+    min_log_interval: float = 5.0
+    heartbeat_log_interval: float = 30.0
+    log_percent_bucket: int = 5
+    last_log_key: str = ""
+    last_log_at: float = 0.0
+    last_progress_at: float = 0.0
+    last_progress_key: str = ""
+    last_git_line_at: float = field(default_factory=time.time)
+
+    @staticmethod
+    def is_noise_line(line: str) -> bool:
+        """过滤 gc / commit-graph 等高频噪声，checkout 阶段每文件都可能触发。"""
+        lower = line.lower()
+        noise_fragments = (
+            "auto packing the repository",
+            "see \"git help gc\"",
+            "collecting referenced commits",
+            "loading known commits in commit graph",
+            "expanding reachable commits in commit graph",
+            "clearing commit marks in commit graph",
+            "writing out commit graph",
+        )
+        return any(fragment in lower for fragment in noise_fragments)
+
+    @staticmethod
+    def _detect_phase(line_lower: str) -> str:
+        for phase in (
+            "enumerating objects",
+            "counting objects",
+            "compressing objects",
+            "receiving objects",
+            "resolving deltas",
+            "checking connectivity",
+            "updating files",
+            "checking out files",
+        ):
+            if phase in line_lower:
+                return phase
+        return ""
+
+    @classmethod
+    def log_dedup_key(cls, line: str, *, percent_bucket: int) -> str:
+        """按阶段 + 百分比分桶去重；Counting 1%/2%/3% 不再逐条刷日志。"""
+        if cls.is_noise_line(line):
+            return "__noise__"
+
+        line_lower = line.lower()
+        phase = cls._detect_phase(line_lower)
+        frac = re.search(r"\((\d+)/(\d+)\)", line)
+        pct = re.search(r"(\d+)%", line)
+
+        if frac:
+            current, total = int(frac.group(1)), int(frac.group(2))
+            if total > 0:
+                bucket = min(100, (current * 100) // total // percent_bucket * percent_bucket)
+                return f"{phase}|{bucket}|{total}"
+
+        if pct and phase:
+            bucket = min(100, int(pct.group(1)) // percent_bucket * percent_bucket)
+            return f"{phase}|pct{bucket}"
+
+        stripped = line.strip()
+        if len(stripped) > 96:
+            return stripped[:96]
+        return stripped
+
+    def on_git_line(self, line: str) -> tuple[bool, bool]:
+        """返回 (是否写日志, 是否更新进度条)。"""
+        lower = line.lower()
+        if "fatal:" in lower or "error:" in lower or "broken pipe" in lower:
+            return True, True
+        if self.is_noise_line(line):
+            return False, False
+
+        now = time.time()
+        self.last_git_line_at = now
+        log_key = self.log_dedup_key(line, percent_bucket=self.log_percent_bucket)
+        if log_key == "__noise__":
+            return False, False
+
+        progress_key = log_key
+        frac = re.search(r"\((\d+)/(\d+)\)", line)
+        if frac:
+            current, total = int(frac.group(1)), int(frac.group(2))
+            if total > 0:
+                progress_key = f"{self._detect_phase(lower)}|{current * 1000 // total}|{total}"
+
+        log_key_changed = log_key != self.last_log_key
+        progress_key_changed = progress_key != self.last_progress_key
+
+        should_log = log_key_changed or (now - self.last_log_at) >= self.min_log_interval
+        if should_log:
+            self.last_log_key = log_key
+            self.last_log_at = now
+
+        should_progress = progress_key_changed or (now - self.last_progress_at) >= self.min_progress_interval
+        if should_progress:
+            self.last_progress_key = progress_key
+            self.last_progress_at = now
+
+        return should_log, should_progress
+
+    def on_heartbeat(self) -> tuple[bool, bool]:
+        """clone 心跳：进度按间隔刷新，日志仅在长时间无 git 输出时追加。"""
+        now = time.time()
+        should_progress = (now - self.last_progress_at) >= self.min_progress_interval
+        if should_progress:
+            self.last_progress_at = now
+
+        should_log = (
+            (now - self.last_log_at) >= self.heartbeat_log_interval
+            and (now - self.last_git_line_at) >= 10.0
+        )
+        if should_log:
+            self.last_log_at = now
+
+        return should_log, should_progress
+
+
+def clone_runtime_config_args() -> list[str]:
+    """clone 期间注入的 git -c 配置，避免 checkout 时反复 auto gc 拖垮大仓。"""
+    pairs = (
+        ("gc.auto", "0"),
+        ("maintenance.auto", "false"),
+        ("core.preloadIndex", "false"),
+    )
+    args: list[str] = []
+    for key, value in pairs:
+        args.extend(["-c", f"{key}={value}"])
+    return args
+
+
+def build_script_clone_command(url: str, target: Path) -> list[str]:
+    """构建与 sausage-biu 脚本一致的全量 clone（无 filter/depth/单分支参数）。"""
+    return ["git", *clone_runtime_config_args(), "clone", "--progress", url, str(target)]
+
+
+def build_repo_git_command(repo_path: Path, *git_args: str) -> list[str]:
+    """在指定仓库目录执行 git 子命令。"""
+    return ["git", *clone_runtime_config_args(), "-C", str(repo_path), *git_args]
+
+
 def build_clone_command(url: str, target: Path, branch: str, shallow: bool) -> list[str]:
-    """构建 git clone 命令，仅拉取指定分支。
+    """构建 git clone 命令。
 
     Args:
         url: 远程仓库地址。
         target: 本地目标路径。
-        branch: 分支名；空则使用远端默认分支。
-        shallow: True 时使用 ``--depth 1``；False 时使用 ``--filter=blob:none``。
+        branch: 分支名；浅克隆时在 clone 阶段指定；全量 clone 由 ``run_script_style_clone_workflow`` 后续 checkout。
+        shallow: True 时使用 ``--depth 1``；False 时仅全量 clone（需配合 fetch/checkout）。
 
     Returns:
         可直接传给 subprocess 的命令参数列表。
     """
-    cmd = ["git", "clone", "--progress", "--verbose", url, str(target)]
     if shallow:
+        cmd = ["git", *clone_runtime_config_args(), "clone", "--progress", url, str(target)]
         cmd.extend(["--depth", "1"])
-    else:
-        cmd.extend(["--filter=blob:none"])
-    if branch:
-        cmd.extend(["--branch", branch, "--single-branch"])
-    return cmd
+        if branch:
+            cmd.extend(["--branch", branch, "--single-branch"])
+        return cmd
+    return build_script_clone_command(url, target)
+
+
+def run_script_style_clone_workflow(
+    url: str,
+    target: Path,
+    branch: str,
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    line_callback: Optional[Callable[[str], None]] = None,
+    heartbeat_callback: Optional[Callable[[int], None]] = None,
+    step_callback: Optional[Callable[[str], None]] = None,
+    active_processes: Optional[list[subprocess.Popen]] = None,
+) -> tuple[bool, str]:
+    """全量 clone + fetch -f + checkout -B，与 sausage-biu 脚本 cloneAll 对齐。
+
+    Args:
+        url: 远程地址。
+        target: 本地路径。
+        branch: 目标分支；空则跳过 checkout 同步。
+        cancel_check: 取消检查。
+        line_callback: git 输出行回调。
+        heartbeat_callback: 心跳回调（秒）。
+        step_callback: 阶段切换回调（如「开始 fetch」）。
+        active_processes: 可选进程跟踪列表。
+
+    Returns:
+        (是否成功, 失败摘要)。
+    """
+    workflow_start = time.time()
+
+    def heartbeat() -> None:
+        if heartbeat_callback:
+            heartbeat_callback(int(time.time() - workflow_start))
+
+    clone_cmd = build_script_clone_command(url, target)
+    if step_callback:
+        step_callback(f"clone：{' '.join(clone_cmd)}")
+    ok, output = run_clone_process(
+        clone_cmd,
+        cancel_check=cancel_check,
+        line_callback=line_callback,
+        heartbeat_callback=lambda _elapsed: heartbeat(),
+        active_processes=active_processes,
+    )
+    if not ok:
+        return ok, output
+
+    if cancel_check and cancel_check():
+        return False, "cancelled"
+
+    fetch_cmd = build_repo_git_command(target, "fetch", "--progress", "-f")
+    if step_callback:
+        step_callback(f"fetch：{' '.join(fetch_cmd)}")
+    ok, output = run_clone_process(
+        fetch_cmd,
+        cancel_check=cancel_check,
+        line_callback=line_callback,
+        heartbeat_callback=lambda _elapsed: heartbeat(),
+        active_processes=active_processes,
+    )
+    if not ok:
+        return ok, output
+
+    if cancel_check and cancel_check():
+        return False, "cancelled"
+
+    branch = (branch or "").strip()
+    if not branch:
+        return True, ""
+
+    checkout_cmd = build_repo_git_command(
+        target, "checkout", "-B", branch, f"origin/{branch}", "-f",
+    )
+    if step_callback:
+        step_callback(f"checkout：{' '.join(checkout_cmd)}")
+    ok, output = run_clone_process(
+        checkout_cmd,
+        cancel_check=cancel_check,
+        line_callback=line_callback,
+        heartbeat_callback=lambda _elapsed: heartbeat(),
+        active_processes=active_processes,
+    )
+    return ok, output
 
 
 def remove_existing_path(target: Path) -> None:

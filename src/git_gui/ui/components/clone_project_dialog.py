@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-import re
 import subprocess
 import threading
 import time
@@ -43,8 +42,10 @@ from ...utils.runtime_paths import (
 from ...core.git_clone import (
     build_clone_command,
     parse_clone_progress_percent,
+    CloneOutputThrottle,
     remove_existing_path,
     run_clone_process,
+    run_script_style_clone_workflow,
     terminate_clone_process,
 )
 from ...utils.subprocess_helpers import subprocess_git_command_kwargs
@@ -387,9 +388,17 @@ class CloneProjectDialog(QDialog):
                     self.progress_emitted.emit(index * 100, total * 100, target.name)
                     continue
             branch = self._resolve_branch(url, preferred_branch)
-            cmd = build_clone_command(url, target, branch, shallow_clone)
-            self.log_emitted.emit(f"[{index}/{total}] {' '.join(cmd)}")
-            ok, output = self._run_clone_process_streaming(cmd, index, total, job["name"])
+            if shallow_clone:
+                cmd = build_clone_command(url, target, branch, True)
+                self.log_emitted.emit(f"[{index}/{total}] {' '.join(cmd)}")
+                ok, output = self._run_clone_process_streaming(cmd, index, total, job["name"])
+            else:
+                self.log_emitted.emit(
+                    f"[{index}/{total}] script-style clone + fetch + checkout ({branch or 'default'})"
+                )
+                ok, output = self._run_script_clone_workflow_streaming(
+                    url, target, branch, index, total, job["name"],
+                )
             if self._cancel_requested:
                 break
             if ok:
@@ -413,14 +422,20 @@ class CloneProjectDialog(QDialog):
             self.primary_project_ready.emit(root_path)
         self.batch_finished.emit(success, summary)
 
-    def _run_clone_process_streaming(self, cmd: list[str], index: int, total: int, repo_name: str) -> tuple[bool, str]:
-        """流式执行 git clone，将 git 原始输出写入日志并驱动进度条。"""
+    def _run_script_clone_workflow_streaming(
+        self,
+        url: str,
+        target: Path,
+        branch: str,
+        index: int,
+        total: int,
+        repo_name: str,
+    ) -> tuple[bool, str]:
+        """全量 clone + fetch + checkout，与 sausage-biu 脚本一致。"""
         repo_percent = 0
         start_time = time.time()
         last_git_status = ""
-        last_logged_key = ""
-        last_git_line_at = start_time
-        last_idle_log_at = 0
+        throttle = CloneOutputThrottle()
 
         def _emit_live_progress(elapsed_seconds: int) -> None:
             nonlocal repo_percent
@@ -438,28 +453,87 @@ class CloneProjectDialog(QDialog):
             self.progress_emitted.emit(completed_scaled, total * 100, title)
 
         def on_line(text: str) -> None:
-            nonlocal repo_percent, last_git_status, last_logged_key, last_git_line_at
-            last_git_line_at = time.time()
+            nonlocal repo_percent, last_git_status
+            should_log, should_progress = throttle.on_git_line(text)
             last_git_status = text if len(text) <= 96 else f"{text[:93]}..."
             parsed = parse_clone_progress_percent(text)
             if parsed is not None:
                 repo_percent = max(repo_percent, parsed)
+            if should_progress:
                 _emit_live_progress(int(time.time() - start_time))
-            log_key_match = re.search(r"\((\d+)/(\d+)\)", text)
-            log_key = log_key_match.group(0) if log_key_match else text
-            if log_key == last_logged_key:
-                return
-            last_logged_key = log_key
-            self.log_emitted.emit(f"[git] {text}")
+            if should_log:
+                self.log_emitted.emit(f"[git] {text}")
 
         def on_heartbeat(elapsed: int) -> None:
-            nonlocal last_idle_log_at
-            _emit_live_progress(elapsed)
-            if time.time() - last_git_line_at < 30:
+            should_log, should_progress = throttle.on_heartbeat()
+            if should_progress:
+                _emit_live_progress(elapsed)
+            if not should_log:
                 return
-            if elapsed - last_idle_log_at < 30:
+            idle_msg = (
+                f"[{index}/{total}] {repo_name} still running ({elapsed}s), no git output yet..."
+                if self.settings.language == "en"
+                else f"[{index}/{total}] {repo_name} 仍在运行（{elapsed}秒），暂未收到 git 输出..."
+            )
+            self.log_emitted.emit(idle_msg)
+
+        def on_step(message: str) -> None:
+            self.log_emitted.emit(f"[{index}/{total}] {message}")
+
+        ok, output = run_script_style_clone_workflow(
+            url,
+            target,
+            branch,
+            cancel_check=lambda: self._cancel_requested,
+            line_callback=on_line,
+            heartbeat_callback=on_heartbeat,
+            step_callback=on_step,
+            active_processes=self._active_processes,
+        )
+        if not ok and output == "cancelled":
+            return False, "cancelled"
+        return ok, output
+
+    def _run_clone_process_streaming(self, cmd: list[str], index: int, total: int, repo_name: str) -> tuple[bool, str]:
+        """流式执行 git clone，将 git 原始输出写入日志并驱动进度条。"""
+        repo_percent = 0
+        start_time = time.time()
+        last_git_status = ""
+        throttle = CloneOutputThrottle()
+
+        def _emit_live_progress(elapsed_seconds: int) -> None:
+            nonlocal repo_percent
+            if repo_percent > 0:
+                inferred_percent = repo_percent
+            else:
+                inferred_percent = min(5, max(1, elapsed_seconds // 30))
+            completed_scaled = (index - 1) * 100 + inferred_percent
+            if last_git_status:
+                title = last_git_status
+            elif self.settings.language == "en":
+                title = f"{repo_name} waiting for git output... {elapsed_seconds}s"
+            else:
+                title = f"{repo_name} 等待 git 输出... {elapsed_seconds}s"
+            self.progress_emitted.emit(completed_scaled, total * 100, title)
+
+        def on_line(text: str) -> None:
+            nonlocal repo_percent, last_git_status
+            should_log, should_progress = throttle.on_git_line(text)
+            last_git_status = text if len(text) <= 96 else f"{text[:93]}..."
+            parsed = parse_clone_progress_percent(text)
+            if parsed is not None:
+                repo_percent = max(repo_percent, parsed)
+            if should_progress:
+                _emit_live_progress(int(time.time() - start_time))
+            if should_log:
+                self.log_emitted.emit(f"[git] {text}")
+
+        def on_heartbeat(elapsed: int) -> None:
+            should_log, should_progress = throttle.on_heartbeat()
+            if should_progress:
+                _emit_live_progress(elapsed)
+            if not should_log:
                 return
-            last_idle_log_at = elapsed
             idle_msg = (
                 f"[{index}/{total}] {repo_name} still running ({elapsed}s), no git output yet..."
                 if self.settings.language == "en"

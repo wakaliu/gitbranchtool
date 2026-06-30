@@ -55,7 +55,7 @@ class OperationLogger:
     def start_operation(self, operation_name: str) -> None:
         """开始一次操作计时。"""
         self._start_time = time.time()
-        self.append(f"[{datetime.now().strftime('%H:%M:%S')}] 开始 {operation_name}...")
+        self.append(f"开始 {operation_name}...")
 
     def end_operation(self, success: bool = True, message: str = "") -> float:
         """结束操作，返回耗时 (秒)。"""
@@ -63,7 +63,7 @@ class OperationLogger:
             return 0.0
         elapsed = time.time() - self._start_time
         status = "成功" if success else "失败"
-        self.append(f"[{datetime.now().strftime('%H:%M:%S')}] {status}，耗时: {elapsed:.2f} 秒 {message}")
+        self.append(f"{status}，耗时: {elapsed:.2f} 秒 {message}".strip())
         self._start_time = None
         return elapsed
 

@@ -2,6 +2,8 @@
 
 封装 QTextEdit，提供自动滚动、颜色高亮和清理功能。
 """
+import html
+
 from PySide6.QtWidgets import QTextEdit
 from PySide6.QtGui import QTextCursor
 
@@ -21,15 +23,16 @@ class LogTextEdit(QTextEdit):
 
     def append_log(self, text: str) -> None:
         """追加日志，支持简单颜色区分 (success/green, error/red)。"""
+        safe = html.escape(text, quote=False)
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.End)
 
         if "成功" in text or "完成" in text or "耗时" in text:
-            cursor.insertHtml(f'<span style="color: #28a745;">{text}</span><br>')
+            cursor.insertHtml(f'<span style="color: #28a745;">{safe}</span><br>')
         elif "失败" in text or "错误" in text or "超时" in text:
-            cursor.insertHtml(f'<span style="color: #dc3545;">{text}</span><br>')
+            cursor.insertHtml(f'<span style="color: #dc3545;">{safe}</span><br>')
         else:
-            cursor.insertHtml(f'{text}<br>')
+            cursor.insertHtml(f'{safe}<br>')
 
         self.setTextCursor(cursor)
         self.ensureCursorVisible()

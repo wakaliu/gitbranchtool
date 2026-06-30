@@ -8,7 +8,6 @@ app:
 paths:
   recent_projects:
   - D:\workspace\unityprj\unity-client-2022
-  - D:\workspace\unityprj\unity-client-2022\sausageman-project
   default_branch: develop
   default_projects_dir: D:/Projects
   last_added_dir: D:\workspace\unityprj\unity-client-2022

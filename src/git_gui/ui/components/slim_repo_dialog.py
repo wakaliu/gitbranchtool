@@ -347,10 +347,11 @@ class SlimRepoDialog(QDialog):
         is_en = language == "en"
         self.setWindowTitle("Repository Slim" if is_en else "仓库瘦身")
         self.hint_label.setText(
-            "Re-clone each repository keeping only the current branch to reduce local disk usage. "
+            "Re-clone repositories via full clone + fetch + checkout (same as biu script). "
             "The project root repository is shown for reference only and cannot be slimmed."
             if is_en
-            else "通过重新 clone 并仅保留当前分支，减小本地仓库磁盘占用。工程根目录仓库仅展示占用，不支持瘦身（避免误删整个工程）。"
+            else "通过全量 clone + fetch + checkout 重新拉取仓库（与 biu 脚本一致）。"
+            "工程根目录仓库仅展示占用，不支持瘦身（避免误删整个工程）。"
         )
         self.btn_select_all.setText("Select/Invert" if is_en else "全选/反选")
         self.btn_refresh_sizes.setText("Refresh Sizes" if is_en else "刷新大小")
