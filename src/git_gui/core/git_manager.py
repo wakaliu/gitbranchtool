@@ -15,9 +15,12 @@ from ..utils.file_utils import get_current_branch, get_directory_size, get_remot
 from ..utils.logger import write_error_log
 from ..utils.subprocess_helpers import subprocess_git_command_kwargs, subprocess_hide_console_kwargs
 from .git_clone import (
+    _CLONE_MAX_RETRIES,
+    begin_reclone_swap,
     build_clone_command,
-    remove_existing_path,
-    run_clone_process,
+    commit_reclone_swap,
+    rollback_reclone_swap,
+    run_clone_command_with_retries,
     run_script_style_clone_workflow,
 )
 
@@ -308,42 +311,52 @@ class GitManager:
             mode = "浅克隆 (--depth 1)" if shallow else "全量 clone + fetch + checkout（与 biu 脚本一致）"
             callback(f"克隆模式：{mode}")
 
-        remove_existing_path(repo_path)
-        repo_path.parent.mkdir(parents=True, exist_ok=True)
-
         line_cb = lambda line: callback(f"  {line}") if callback else None
         heartbeat_cb = lambda elapsed: callback(f"clone 进行中... {elapsed}s") if callback else None
         step_cb = lambda msg: callback(msg) if callback else None
 
-        if shallow:
-            cmd = build_clone_command(url, repo_path, branch, True)
-            write_error_log("瘦身 clone", f"repo={repo_path}\ncmd={' '.join(cmd)}")
-            if callback:
-                callback(f"执行 clone：{' '.join(cmd)}")
-            ok, output = run_clone_process(
-                cmd,
-                cancel_check=cancel_check,
-                line_callback=line_cb,
-                heartbeat_callback=heartbeat_cb,
-            )
-        else:
-            write_error_log(
-                "瘦身 clone",
-                f"repo={repo_path}\nworkflow=script-style\nurl={url}\nbranch={branch}",
-            )
-            ok, output = run_script_style_clone_workflow(
-                url,
-                repo_path,
-                branch,
-                cancel_check=cancel_check,
-                line_callback=line_cb,
-                heartbeat_callback=heartbeat_cb,
-                step_callback=step_cb,
-            )
-        if not ok:
-            if callback and output:
-                callback(f"clone 失败：{output}")
-            raise RuntimeError(output or f"{repo_path.name}: clone 失败")
+        backup: Optional[Path] = None
+        try:
+            backup = begin_reclone_swap(repo_path)
+
+            if shallow:
+                cmd = build_clone_command(url, repo_path, branch, True, slim=True)
+                write_error_log("瘦身 clone", f"repo={repo_path}\ncmd={' '.join(cmd)}")
+                ok, output = run_clone_command_with_retries(
+                    cmd,
+                    repo_path,
+                    cancel_check=cancel_check,
+                    line_callback=line_cb,
+                    heartbeat_callback=heartbeat_cb,
+                    step_callback=step_cb,
+                )
+            else:
+                write_error_log(
+                    "瘦身 clone",
+                    f"repo={repo_path}\nworkflow=script-style\nurl={url}\nbranch={branch}",
+                )
+                ok, output = run_script_style_clone_workflow(
+                    url,
+                    repo_path,
+                    branch,
+                    cancel_check=cancel_check,
+                    line_callback=line_cb,
+                    heartbeat_callback=heartbeat_cb,
+                    step_callback=step_cb,
+                    max_clone_retries=_CLONE_MAX_RETRIES,
+                    slim=True,
+                )
+            if not ok:
+                if callback and output:
+                    callback(f"clone 失败：{output}")
+                raise RuntimeError(output or f"{repo_path.name}: clone 失败")
+
+            commit_reclone_swap(backup)
+            backup = None
+        except Exception:
+            if backup is not None:
+                rollback_reclone_swap(repo_path, backup)
+            raise
 
         size_after = get_directory_size(repo_path)
         saved = size_before - size_after

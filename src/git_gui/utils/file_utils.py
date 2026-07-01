@@ -2,11 +2,14 @@
 
 专注于纯路径操作和仓库识别，保持单一职责。
 """
+from __future__ import annotations
+
 from pathlib import Path
 from typing import List, Optional
 import os
 import platform
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -144,11 +147,58 @@ def get_remote_url(repo_path: Path) -> str:
 
 
 def normalize_repo_path_key(path: Path | str) -> str:
-    """统一仓库路径键，避免 Windows 下大小写/斜杠差异导致合计统计遗漏。"""
+    """统一仓库路径键，避免 Windows/macOS 下大小写、符号链接差异导致匹配遗漏。"""
+    p = Path(path)
     try:
-        return os.path.normcase(str(Path(path).resolve()))
+        resolved = p.resolve()
     except (OSError, RuntimeError):
-        return os.path.normcase(str(Path(path)))
+        resolved = p
+    try:
+        if resolved.exists():
+            st = os.stat(resolved, follow_symlinks=True)
+            return f"{int(st.st_dev)}:{int(st.st_ino)}"
+    except OSError:
+        pass
+    text = os.path.normcase(str(resolved))
+    if sys.platform == "darwin":
+        text = text.casefold()
+    return text
+
+
+def paths_refer_to_same_location(left: Path | str, right: Path | str) -> bool:
+    """判断两路径是否指向同一目录（macOS 大小写不敏感卷上也能正确匹配）。"""
+    if normalize_repo_path_key(left) == normalize_repo_path_key(right):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def resolve_primary_repository_path(
+    project_path: Path | str,
+    repositories: list,
+) -> Path | None:
+    """解析工程的主仓库路径（瘦身等操作需排除）。
+
+    优先匹配 ``project_path`` 本身；若工程目录不是 Git 仓（如 sausage 工程根为
+    ``client_ios1``、主仓在 ``client_ios1/ios``），则取列表首行主仓库。
+    """
+    project = Path(project_path)
+    repo_paths: list[Path] = []
+    for repo in repositories:
+        repo_path = repo.path if hasattr(repo, "path") else Path(repo)
+        repo_paths.append(repo_path)
+        if paths_refer_to_same_location(repo_path, project):
+            return repo_path
+    if is_git_repository(project):
+        try:
+            return project.resolve()
+        except (OSError, RuntimeError):
+            return project
+    if repo_paths:
+        return repo_paths[0]
+    return None
 
 
 def _as_scan_path(path: Path) -> Path:

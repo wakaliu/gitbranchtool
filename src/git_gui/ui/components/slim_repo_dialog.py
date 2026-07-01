@@ -27,6 +27,8 @@ from ...utils.file_utils import (
     format_bytes,
     get_directory_size,
     normalize_repo_path_key,
+    paths_refer_to_same_location,
+    resolve_primary_repository_path,
 )
 from ...utils.logger import write_error_log
 
@@ -49,8 +51,13 @@ class SlimRepoDialog(QDialog):
         self.settings = Settings()
         self.repositories = list(repositories or [])
         self._project_root = project_root
+        self._primary_repo_path = resolve_primary_repository_path(
+            project_root, self.repositories
+        ) if project_root else None
         self._root_repo_key = (
-            normalize_repo_path_key(project_root) if project_root else ""
+            normalize_repo_path_key(self._primary_repo_path)
+            if self._primary_repo_path
+            else ""
         )
         self._language = self.settings.language
         self._size_by_path: dict[str, int] = {}
@@ -132,11 +139,16 @@ class SlimRepoDialog(QDialog):
         layout.addWidget(checkbox)
         return wrapper, checkbox
 
+    def _is_root_repo(self, repo: GitRepository) -> bool:
+        if not self._primary_repo_path:
+            return False
+        return paths_refer_to_same_location(repo.path, self._primary_repo_path)
+
     def _populate_table(self) -> None:
         self.repo_table.setRowCount(len(self.repositories))
         self._row_checkboxes.clear()
         for row, repo in enumerate(self.repositories):
-            is_root_repo = normalize_repo_path_key(repo.path) == self._root_repo_key
+            is_root_repo = self._is_root_repo(repo)
             wrapper, checkbox = self._create_centered_checkbox(checked=not is_root_repo)
             if is_root_repo:
                 checkbox.setEnabled(False)

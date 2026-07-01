@@ -144,30 +144,87 @@ class CloneOutputThrottle:
         return should_log, should_progress
 
 
-def clone_runtime_config_args() -> list[str]:
+def clone_runtime_config_args(*, slim: bool = False) -> list[str]:
     """clone 期间注入的 git -c 配置，避免 checkout 时反复 auto gc 拖垮大仓。"""
-    pairs = (
+    pairs: list[tuple[str, str]] = [
         ("gc.auto", "0"),
         ("maintenance.auto", "false"),
         ("core.preloadIndex", "false"),
-    )
+    ]
+    if slim:
+        pairs.extend(
+            [
+                ("http.postBuffer", "524288000"),
+                ("http.lowSpeedLimit", "1000"),
+                ("http.lowSpeedTime", "600"),
+            ]
+        )
     args: list[str] = []
     for key, value in pairs:
         args.extend(["-c", f"{key}={value}"])
     return args
 
 
-def build_script_clone_command(url: str, target: Path) -> list[str]:
+_CLONE_MAX_RETRIES = 3
+_CLONE_RETRY_DELAY_SEC = 5
+_TRANSIENT_CLONE_MARKERS = (
+    "transfer closed with outstanding",
+    "unexpected disconnect",
+    "early eof",
+    "premature eof",
+    "index-pack",
+    "rpc failed",
+    "rpc 失败",
+    "curl 18",
+    "broken pipe",
+    "connection reset",
+    "connection timed out",
+    "timed out",
+    "过早的文件结束符",
+    "无效的 index-pack",
+    "invalid index-pack",
+)
+
+
+def is_transient_clone_failure(summary: str) -> bool:
+    """判断 clone 失败是否可能由网络抖动导致，适合自动重试。"""
+    text = (summary or "").lower()
+    return any(marker in text for marker in _TRANSIENT_CLONE_MARKERS)
+
+
+def begin_reclone_swap(repo_path: Path) -> Path:
+    """将现有仓库挪到旁路目录，腾出目标路径；失败时可 rollback_reclone_swap 还原。"""
+    if not repo_path.exists():
+        raise FileNotFoundError(repo_path)
+    backup = repo_path.parent / f".{repo_path.name}.slim-backup"
+    remove_existing_path(backup)
+    shutil.move(str(repo_path), str(backup))
+    return backup
+
+
+def commit_reclone_swap(backup: Path) -> None:
+    """re-clone 成功后删除旁路备份。"""
+    remove_existing_path(backup)
+
+
+def rollback_reclone_swap(repo_path: Path, backup: Path) -> None:
+    """re-clone 失败时删除残缺目录并恢复原仓库。"""
+    remove_existing_path(repo_path)
+    if backup.exists():
+        shutil.move(str(backup), str(repo_path))
+
+
+def build_script_clone_command(url: str, target: Path, *, slim: bool = False) -> list[str]:
     """构建与 sausage-biu 脚本一致的全量 clone（无 filter/depth/单分支参数）。"""
-    return ["git", *clone_runtime_config_args(), "clone", "--progress", url, str(target)]
+    return ["git", *clone_runtime_config_args(slim=slim), "clone", "--progress", url, str(target)]
 
 
-def build_repo_git_command(repo_path: Path, *git_args: str) -> list[str]:
+def build_repo_git_command(repo_path: Path, *git_args: str, slim: bool = False) -> list[str]:
     """在指定仓库目录执行 git 子命令。"""
-    return ["git", *clone_runtime_config_args(), "-C", str(repo_path), *git_args]
+    return ["git", *clone_runtime_config_args(slim=slim), "-C", str(repo_path), *git_args]
 
 
-def build_clone_command(url: str, target: Path, branch: str, shallow: bool) -> list[str]:
+def build_clone_command(url: str, target: Path, branch: str, shallow: bool, *, slim: bool = False) -> list[str]:
     """构建 git clone 命令。
 
     Args:
@@ -180,12 +237,12 @@ def build_clone_command(url: str, target: Path, branch: str, shallow: bool) -> l
         可直接传给 subprocess 的命令参数列表。
     """
     if shallow:
-        cmd = ["git", *clone_runtime_config_args(), "clone", "--progress", url, str(target)]
+        cmd = ["git", *clone_runtime_config_args(slim=slim), "clone", "--progress", url, str(target)]
         cmd.extend(["--depth", "1"])
         if branch:
             cmd.extend(["--branch", branch, "--single-branch"])
         return cmd
-    return build_script_clone_command(url, target)
+    return build_script_clone_command(url, target, slim=slim)
 
 
 def run_script_style_clone_workflow(
@@ -198,6 +255,8 @@ def run_script_style_clone_workflow(
     heartbeat_callback: Optional[Callable[[int], None]] = None,
     step_callback: Optional[Callable[[str], None]] = None,
     active_processes: Optional[list[subprocess.Popen]] = None,
+    max_clone_retries: int = 1,
+    slim: bool = False,
 ) -> tuple[bool, str]:
     """全量 clone + fetch -f + checkout -B，与 sausage-biu 脚本 cloneAll 对齐。
 
@@ -220,23 +279,36 @@ def run_script_style_clone_workflow(
         if heartbeat_callback:
             heartbeat_callback(int(time.time() - workflow_start))
 
-    clone_cmd = build_script_clone_command(url, target)
-    if step_callback:
-        step_callback(f"clone：{' '.join(clone_cmd)}")
-    ok, output = run_clone_process(
-        clone_cmd,
-        cancel_check=cancel_check,
-        line_callback=line_callback,
-        heartbeat_callback=lambda _elapsed: heartbeat(),
-        active_processes=active_processes,
-    )
+    clone_cmd = build_script_clone_command(url, target, slim=slim)
+    ok = False
+    output = ""
+    attempts = max(1, max_clone_retries)
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            remove_existing_path(target)
+            if step_callback:
+                step_callback(f"clone 第 {attempt}/{attempts} 次重试…")
+            time.sleep(_CLONE_RETRY_DELAY_SEC)
+        if step_callback:
+            step_callback(f"clone：{' '.join(clone_cmd)}")
+        ok, output = run_clone_process(
+            clone_cmd,
+            cancel_check=cancel_check,
+            line_callback=line_callback,
+            heartbeat_callback=lambda _elapsed: heartbeat(),
+            active_processes=active_processes,
+        )
+        if ok:
+            break
+        if attempt >= attempts or not is_transient_clone_failure(output):
+            break
     if not ok:
         return ok, output
 
     if cancel_check and cancel_check():
         return False, "cancelled"
 
-    fetch_cmd = build_repo_git_command(target, "fetch", "--progress", "-f")
+    fetch_cmd = build_repo_git_command(target, "fetch", "--progress", "-f", slim=slim)
     if step_callback:
         step_callback(f"fetch：{' '.join(fetch_cmd)}")
     ok, output = run_clone_process(
@@ -257,7 +329,7 @@ def run_script_style_clone_workflow(
         return True, ""
 
     checkout_cmd = build_repo_git_command(
-        target, "checkout", "-B", branch, f"origin/{branch}", "-f",
+        target, "checkout", "-B", branch, f"origin/{branch}", "-f", slim=slim,
     )
     if step_callback:
         step_callback(f"checkout：{' '.join(checkout_cmd)}")
@@ -268,6 +340,39 @@ def run_script_style_clone_workflow(
         heartbeat_callback=lambda _elapsed: heartbeat(),
         active_processes=active_processes,
     )
+    return ok, output
+
+
+def run_clone_command_with_retries(
+    cmd: list[str],
+    target: Path,
+    *,
+    max_retries: int = _CLONE_MAX_RETRIES,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    line_callback: Optional[Callable[[str], None]] = None,
+    heartbeat_callback: Optional[Callable[[int], None]] = None,
+    step_callback: Optional[Callable[[str], None]] = None,
+) -> tuple[bool, str]:
+    """执行单次 clone 命令，对疑似网络中断的失败自动重试。"""
+    ok = False
+    output = ""
+    attempts = max(1, max_retries)
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            remove_existing_path(target)
+            if step_callback:
+                step_callback(f"clone 第 {attempt}/{attempts} 次重试…")
+            time.sleep(_CLONE_RETRY_DELAY_SEC)
+        if step_callback:
+            step_callback(f"执行 clone：{' '.join(cmd)}")
+        ok, output = run_clone_process(
+            cmd,
+            cancel_check=cancel_check,
+            line_callback=line_callback,
+            heartbeat_callback=heartbeat_callback,
+        )
+        if ok or attempt >= attempts or not is_transient_clone_failure(output):
+            break
     return ok, output
 
 
@@ -282,7 +387,9 @@ def remove_existing_path(target: Path) -> None:
     Raises:
         OSError: 删除失败且重试仍无法完成。
     """
-    if target.is_file():
+    if not target.exists() and not target.is_symlink():
+        return
+    if target.is_file() or target.is_symlink():
         target.unlink(missing_ok=True)
         return
 

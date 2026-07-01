@@ -20,7 +20,7 @@ from ..core.project_manager import ProjectManager
 from ..core.git_manager import GitManager
 from ..core.git_clone import parse_clone_progress_percent, CloneOutputThrottle
 from ..utils.logger import OperationLogger, write_error_log
-from ..utils.file_utils import normalize_repo_path_key
+from ..utils.file_utils import normalize_repo_path_key, paths_refer_to_same_location, resolve_primary_repository_path
 from ..utils.thread_pool import ThreadPoolManager, Worker
 from ..models.project import Project
 from .components.project_panel import ProjectPanel
@@ -399,8 +399,22 @@ class MainWindow(QMainWindow):
         if not repo_paths:
             return
         if self.current_project_path:
-            root_key = normalize_repo_path_key(self.current_project_path)
-            repo_paths = [p for p in repo_paths if normalize_repo_path_key(p) != root_key]
+            project_root = self.current_project_path
+            project = self.project_manager.get_project_by_path(project_root)
+            primary_path = resolve_primary_repository_path(
+                project_root,
+                project.repositories if project else [],
+            )
+            repo_paths = [
+                p for p in repo_paths
+                if not (
+                    paths_refer_to_same_location(p, project_root)
+                    or (
+                        primary_path is not None
+                        and paths_refer_to_same_location(p, primary_path)
+                    )
+                )
+            ]
         if not repo_paths:
             QMessageBox.warning(self, "提示", "工程根目录不支持瘦身，请仅选择子仓库。")
             return
