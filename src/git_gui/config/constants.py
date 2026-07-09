@@ -8,7 +8,7 @@ from typing import Final
 
 # 应用信息
 APP_NAME: Final[str] = "Git 拉线切线工具"
-APP_VERSION: Final[str] = "1.0.4"
+APP_VERSION: Final[str] = "1.0.5"
 ORGANIZATION: Final[str] = "SausageDev"
 
 # 支持的语言
