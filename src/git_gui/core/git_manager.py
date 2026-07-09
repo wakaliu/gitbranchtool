@@ -128,7 +128,12 @@ class GitManager:
                         continue
 
             # 总是清理当前repo的lock文件（后备+主要方案）
-            for lock_name in [".git/index.lock", ".git/HEAD.lock", ".git/refs/heads.lock"]:
+            for lock_name in [
+                ".git/index.lock",
+                ".git/HEAD.lock",
+                ".git/refs/heads.lock",
+                ".git/config.lock",
+            ]:
                 lock_file = repo_path / lock_name
                 if lock_file.exists():
                     try:
@@ -178,6 +183,32 @@ class GitManager:
         parts.append(f"Discard(clean): {clean_out}")
         return "\n".join(parts)
 
+    @staticmethod
+    def _is_submodule_gitdir(repo_path: Path) -> bool:
+        """子模块/嵌套仓的 ``.git`` 为指向 gitdir 的文件，切线流程与独立仓不同。"""
+        return (repo_path / ".git").is_file()
+
+    @staticmethod
+    def _looks_like_git_failure(output: str) -> bool:
+        """判断 git 输出是否表示失败，供切线步骤决定是否解锁重试。"""
+        text = (output or "").strip().lower()
+        if not text:
+            return False
+        if text.startswith("命令超时") or text.startswith("执行失败") or text.startswith("git 未安装"):
+            return True
+        return any(marker in text for marker in ("fatal:", "error:", "index.lock", "config.lock"))
+
+    def _run_switch_git(self, repo_path: Path, args: List[str], timeout: int = 300) -> str:
+        """切线步骤专用 git 调用：大仓 reset/checkout 耗时长，失败时解锁并重试一次。"""
+        output = self._run_git(repo_path, args, timeout=timeout)
+        if self._looks_like_git_failure(output):
+            self._unlock_git(repo_path)
+            retry = self._run_git(repo_path, args, timeout=timeout)
+            if not self._looks_like_git_failure(retry):
+                return retry
+            return retry or output
+        return output
+
     def get_repository_status(self, repo_path: Path) -> GitRepository:
         """获取或更新仓库状态。"""
         branch = get_current_branch(repo_path)
@@ -205,7 +236,7 @@ class GitManager:
         """切换分支 (一键切线)。
 
         每次操作前强制_unlock_git，解决“旧git进程残留导致并发冲突/闪退”问题。
-        逻辑顺序：unlock -> 按规则处理工作区 (stash / 丢弃) -> fetch(-f) -> checkout -B --force。
+        切线流程对齐 sausage-biu 脚本：fetch -p ->（子模块/普通仓分支）-> reset --hard origin/branch -> clean。
 
         工作区规则（``git.switch_max_stash_files`` 可配置，默认 500）：
         - 无变动文件：跳过 stash/丢弃。
@@ -255,14 +286,31 @@ class GitManager:
                 outputs.append("未勾选 Stash，已丢弃本地修改")
                 outputs.append(self._discard_local_worktree(repo_path))
 
-        # Fetch (使用 -f 强制更新，timeout增加防卡住)
-        fetch_out = self._run_git(repo_path, ["fetch", "origin", target_branch, "--no-tags", "-f"], timeout=60)
+        # fetch -p：与 biu 脚本一致，仅拉目标分支并 prune 失效远程引用
+        fetch_out = self._run_git(
+            repo_path, ["fetch", "origin", target_branch, "-p", "-f", "--no-tags"], timeout=120,
+        )
         outputs.append(f"Fetch: {fetch_out}")
 
-        # 强制切换分支 (timeout增加，防止长时间卡住)
-        switch_args = ["checkout", "-B", target_branch, f"origin/{target_branch}", "--force"]
-        switch_out = self._run_git(repo_path, switch_args, timeout=45)
-        outputs.append(f"Switch: {switch_out}")
+        remote_ref = f"origin/{target_branch}"
+        if self._is_submodule_gitdir(repo_path):
+            clean_out = self._run_switch_git(repo_path, ["clean", "-dfq"])
+            outputs.append(f"Clean: {clean_out}")
+            reset_out = self._run_switch_git(repo_path, ["reset", "--hard", remote_ref])
+            outputs.append(f"Reset: {reset_out}")
+            switch_out = self._run_switch_git(repo_path, ["checkout", "--detach", remote_ref])
+            outputs.append(f"Switch: {switch_out}")
+        else:
+            checkout_out = self._run_switch_git(
+                repo_path, ["checkout", "-f", "-B", target_branch, remote_ref],
+            )
+            outputs.append(f"Checkout: {checkout_out}")
+            reset_out = self._run_switch_git(repo_path, ["reset", "--hard", remote_ref])
+            outputs.append(f"Reset: {reset_out}")
+            clean_out = self._run_switch_git(repo_path, ["clean", "-dfq"])
+            outputs.append(f"Clean: {clean_out}")
+            switch_out = self._run_switch_git(repo_path, ["checkout", "-f", "-B", target_branch])
+            outputs.append(f"Switch: {switch_out}")
 
         result = "\n".join(outputs)
         write_error_log("切线结束", f"repo={repo_path}\nresult_preview={result[:400]}")
