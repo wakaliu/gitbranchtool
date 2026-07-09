@@ -12,6 +12,7 @@ import yaml
 from typing import Any, Dict
 from .constants import (
     DEFAULT_LANGUAGE, DEFAULT_THEME, DEFAULT_MAX_CONCURRENT,
+    DEFAULT_SWITCH_CHECKOUT_TIMEOUT, DEFAULT_SWITCH_FETCH_TIMEOUT,
     LOG_MAX_LINES, APP_NAME, APP_VERSION, DEFAULT_PROJECTS_DIR
 )
 from ..utils.runtime_paths import get_config_file_path, get_embedded_assets_dir
@@ -59,6 +60,8 @@ class Settings:
                 "switch_force": True,
                 "auto_unlock": True,
                 "switch_max_stash_files": 500,
+                "switch_checkout_timeout": DEFAULT_SWITCH_CHECKOUT_TIMEOUT,
+                "switch_fetch_timeout": DEFAULT_SWITCH_FETCH_TIMEOUT,
                 "slim_shallow": False,
             },
             "ui": {

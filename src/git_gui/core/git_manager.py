@@ -18,6 +18,7 @@ from .git_clone import (
     _CLONE_MAX_RETRIES,
     begin_reclone_swap,
     build_clone_command,
+    clone_runtime_config_args,
     commit_reclone_swap,
     rollback_reclone_swap,
     run_clone_command_with_retries,
@@ -33,12 +34,30 @@ class GitManager:
     def __init__(self):
         self.settings = Settings()
 
-    def _run_git(self, repo_path: Path, args: List[str], timeout: int = 45) -> str:
+    def _run_git(
+        self,
+        repo_path: Path,
+        args: List[str],
+        timeout: int = 45,
+        *,
+        runtime_config: bool = False,
+    ) -> str:
         """执行 git 命令，返回输出。自动处理常见错误。
 
-        默认timeout提高到45s (switch/fetch可单独覆盖)，防止33%卡住。
+        默认 timeout 45s；大仓 checkout/fetch 可通过 ``runtime_config`` 注入
+        ``gc.auto=0`` 等参数，避免切线过程中 auto gc 拖慢或触发超时。
+
+        Args:
+            repo_path: 仓库根目录。
+            args: ``git`` 之后的子命令参数。
+            timeout: 子进程超时秒数。
+            runtime_config: 是否注入 clone 同款运行时 git -c 配置（大仓切线用）。
+
+        Returns:
+            命令 stdout/stderr 摘要；失败或超时为可读错误字符串。
         """
-        cmd = ["git"] + args
+        config_prefix = clone_runtime_config_args(slim=False) if runtime_config else []
+        cmd = ["git", *config_prefix] + args
         write_error_log("Git命令开始", f"repo={repo_path}\ncmd={' '.join(cmd)}\ntimeout={timeout}")
         try:
             result = subprocess.run(
@@ -255,13 +274,28 @@ class GitManager:
                 outputs.append("未勾选 Stash，已丢弃本地修改")
                 outputs.append(self._discard_local_worktree(repo_path))
 
-        # Fetch (使用 -f 强制更新，timeout增加防卡住)
-        fetch_out = self._run_git(repo_path, ["fetch", "origin", target_branch, "--no-tags", "-f"], timeout=60)
+        fetch_timeout = int(self.settings.get("git.switch_fetch_timeout", 120))
+        checkout_timeout = int(self.settings.get("git.switch_checkout_timeout", 300))
+
+        fetch_out = self._run_git(
+            repo_path,
+            ["fetch", "origin", target_branch, "--no-tags", "-f"],
+            timeout=fetch_timeout,
+            runtime_config=True,
+        )
         outputs.append(f"Fetch: {fetch_out}")
 
-        # 强制切换分支 (timeout增加，防止长时间卡住)
         switch_args = ["checkout", "-B", target_branch, f"origin/{target_branch}", "--force"]
-        switch_out = self._run_git(repo_path, switch_args, timeout=45)
+        switch_out = self._run_git(
+            repo_path, switch_args, timeout=checkout_timeout, runtime_config=True,
+        )
+        if switch_out.startswith("命令超时"):
+            self._unlock_git(repo_path)
+            switch_out = self._run_git(
+                repo_path, switch_args, timeout=checkout_timeout, runtime_config=True,
+            )
+            if not switch_out.startswith("命令超时"):
+                outputs.append("Switch: checkout 超时后已自动重试并成功")
         outputs.append(f"Switch: {switch_out}")
 
         result = "\n".join(outputs)
