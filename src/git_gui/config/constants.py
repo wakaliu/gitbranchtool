@@ -21,8 +21,6 @@ DEFAULT_THEME: Final[str] = "light"
 
 # Git 相关
 DEFAULT_MAX_CONCURRENT: Final[int] = 6
-DEFAULT_SWITCH_CHECKOUT_TIMEOUT: Final[int] = 300
-DEFAULT_SWITCH_FETCH_TIMEOUT: Final[int] = 120
 GIT_LOCK_FILES: Final[list[str]] = [".git/index.lock", ".git/HEAD.lock"]
 
 # UI 常量
