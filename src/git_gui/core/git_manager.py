@@ -188,26 +188,72 @@ class GitManager:
         """子模块/嵌套仓的 ``.git`` 为指向 gitdir 的文件，切线流程与独立仓不同。"""
         return (repo_path / ".git").is_file()
 
-    @staticmethod
-    def _looks_like_git_failure(output: str) -> bool:
-        """判断 git 输出是否表示失败，供切线步骤决定是否解锁重试。"""
-        text = (output or "").strip().lower()
-        if not text:
-            return False
-        if text.startswith("命令超时") or text.startswith("执行失败") or text.startswith("git 未安装"):
-            return True
-        return any(marker in text for marker in ("fatal:", "error:", "index.lock", "config.lock"))
 
-    def _run_switch_git(self, repo_path: Path, args: List[str], timeout: int = 300) -> str:
-        """切线步骤专用 git 调用：大仓 reset/checkout 耗时长，失败时解锁并重试一次。"""
-        output = self._run_git(repo_path, args, timeout=timeout)
-        if self._looks_like_git_failure(output):
-            self._unlock_git(repo_path)
-            retry = self._run_git(repo_path, args, timeout=timeout)
-            if not self._looks_like_git_failure(retry):
-                return retry
-            return retry or output
-        return output
+    def _run_switch_git(
+        self,
+        repo_path: Path,
+        args: List[str],
+        timeout: int = 300,
+        *,
+        heartbeat_callback: Optional[Callable[[int], None]] = None,
+    ) -> str:
+        """切线步骤专用 git 调用：大仓耗时长时可回传心跳，失败时解锁并重试一次。"""
+        cmd = ["git"] + args
+        write_error_log("Git命令开始", f"repo={repo_path}\ncmd={' '.join(cmd)}\ntimeout={timeout}")
+
+        def _execute_once() -> tuple[int, str]:
+            if heartbeat_callback is None:
+                result = subprocess.run(
+                    cmd,
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    **subprocess_git_command_kwargs(),
+                )
+                text = (result.stdout or "").strip() or (result.stderr or "").strip()
+                return result.returncode if result.returncode is not None else 0, text
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(repo_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                **subprocess_git_command_kwargs(),
+            )
+            start = time.time()
+            while True:
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                    text = (stdout or "").strip() or (stderr or "").strip()
+                    return proc.returncode if proc.returncode is not None else 0, text
+                except subprocess.TimeoutExpired:
+                    heartbeat_callback(int(time.time() - start))
+                    if time.time() - start > timeout:
+                        proc.kill()
+                        proc.communicate()
+                        return -1, f"命令超时: {' '.join(args)}"
+
+        try:
+            code, output = _execute_once()
+            if code != 0:
+                write_error_log(
+                    "Git命令失败",
+                    f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={code}\nstderr={output[:400]}",
+                )
+                if "index.lock" in output or "config.lock" in output or "Another git process" in output:
+                    self._unlock_git(repo_path)
+                    code, output = _execute_once()
+                    write_error_log("Git命令重试完成", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={code}")
+            write_error_log("Git命令结束", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={code}")
+            return output
+        except FileNotFoundError:
+            write_error_log("Git命令异常", f"repo={repo_path}\ncmd={' '.join(cmd)}\nGit 未安装或未加入 PATH")
+            return "Git 未安装或未加入 PATH"
+        except Exception as e:
+            write_error_log("Git命令异常", f"repo={repo_path}\ncmd={' '.join(cmd)}\nerror={e}")
+            return f"执行失败: {str(e)}"
 
     def get_repository_status(self, repo_path: Path) -> GitRepository:
         """获取或更新仓库状态。"""
@@ -257,60 +303,76 @@ class GitManager:
         if not target_branch:
             target_branch = get_current_branch(repo_path)
 
+        def _step(message: str) -> None:
+            if callback:
+                callback(message)
+
         # 每次切线前强制解锁，防止并行或残留进程导致index.lock冲突（用户反馈核心原因）
+        _step(f"> 开始切线 {repo_path.name} -> {target_branch}")
         self._unlock_git(repo_path)
         write_error_log("切线开始", f"repo={repo_path}\ntarget_branch={target_branch}\nstash={stash}")
-
-        if callback:
-            callback(f"正在切换到 {target_branch} @ {repo_path.name}...")
 
         outputs = []
 
         max_files = int(self.settings.get("git.switch_max_stash_files", 500))
+        _step("> 检查工作区变动")
         changed_files = self._count_unique_changed_paths(repo_path)
 
         if changed_files > 0:
             if changed_files > max_files:
+                _step(f"> 本地变动 {changed_files} 个文件，超过上限，强制丢弃")
                 outputs.append(
                     f"本地变动文件数 {changed_files} 超过上限 {max_files}，已强制丢弃本地修改（忽略 Stash 勾选）"
                 )
                 outputs.append(self._discard_local_worktree(repo_path))
             elif stash:
+                _step(f"> git stash push -u（{changed_files} 个文件）")
                 stash_out = self._run_git(
                     repo_path,
                     ["stash", "push", "-u", "-m", "Auto-stash before switch"],
                     timeout=120,
                 )
                 outputs.append(f"Stash: {stash_out}")
+                if stash_out:
+                    _step(f"  stash: {stash_out[:120]}")
             else:
+                _step(f"> 丢弃本地修改（{changed_files} 个文件）")
                 outputs.append("未勾选 Stash，已丢弃本地修改")
                 outputs.append(self._discard_local_worktree(repo_path))
 
-        # fetch -p：与 biu 脚本一致，仅拉目标分支并 prune 失效远程引用
-        fetch_out = self._run_git(
-            repo_path, ["fetch", "origin", target_branch, "-p", "-f", "--no-tags"], timeout=120,
+        def _run_step(args: List[str], label: str, timeout: int = 300) -> str:
+            _step(f"> git {' '.join(args)}")
+            heartbeat = (lambda elapsed: _step(f"  {label} 进行中... {elapsed}s")) if callback else None
+            output = self._run_switch_git(repo_path, args, timeout=timeout, heartbeat_callback=heartbeat)
+            if output:
+                preview = output if len(output) <= 160 else output[:160] + "..."
+                _step(f"  {label}: {preview}")
+            return output
+
+        fetch_out = _run_step(
+            ["fetch", "origin", target_branch, "-p", "-f", "--no-tags"], "fetch", timeout=120,
         )
         outputs.append(f"Fetch: {fetch_out}")
 
         remote_ref = f"origin/{target_branch}"
         if self._is_submodule_gitdir(repo_path):
-            clean_out = self._run_switch_git(repo_path, ["clean", "-dfq"])
+            clean_out = _run_step(["clean", "-dfq"], "clean")
             outputs.append(f"Clean: {clean_out}")
-            reset_out = self._run_switch_git(repo_path, ["reset", "--hard", remote_ref])
+            reset_out = _run_step(["reset", "--hard", remote_ref], "reset")
             outputs.append(f"Reset: {reset_out}")
-            switch_out = self._run_switch_git(repo_path, ["checkout", "--detach", remote_ref])
+            switch_out = _run_step(["checkout", "--detach", remote_ref], "checkout")
             outputs.append(f"Switch: {switch_out}")
         else:
-            checkout_out = self._run_switch_git(
-                repo_path, ["checkout", "-f", "-B", target_branch, remote_ref],
-            )
+            checkout_out = _run_step(["checkout", "-f", "-B", target_branch, remote_ref], "checkout")
             outputs.append(f"Checkout: {checkout_out}")
-            reset_out = self._run_switch_git(repo_path, ["reset", "--hard", remote_ref])
+            reset_out = _run_step(["reset", "--hard", remote_ref], "reset")
             outputs.append(f"Reset: {reset_out}")
-            clean_out = self._run_switch_git(repo_path, ["clean", "-dfq"])
+            clean_out = _run_step(["clean", "-dfq"], "clean")
             outputs.append(f"Clean: {clean_out}")
-            switch_out = self._run_switch_git(repo_path, ["checkout", "-f", "-B", target_branch])
+            switch_out = _run_step(["checkout", "-f", "-B", target_branch], "checkout")
             outputs.append(f"Switch: {switch_out}")
+
+        _step(f"> 切线完成 {repo_path.name}")
 
         result = "\n".join(outputs)
         write_error_log("切线结束", f"repo={repo_path}\nresult_preview={result[:400]}")

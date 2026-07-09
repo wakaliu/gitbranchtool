@@ -490,8 +490,13 @@ class MainWindow(QMainWindow):
         if parsed_pct is not None:
             clone_map[index] = parsed_pct / 100.0
 
-        is_heartbeat = "clone 进行中" in message
-        if update_log and (parsed_pct is not None or not is_heartbeat):
+        is_heartbeat = any(
+            token in message for token in ("clone 进行中", "fetch 进行中", "checkout 进行中", "reset 进行中", "clean 进行中")
+        )
+        if message.startswith("> git") or message.startswith("> 开始切线") or message.startswith("> 检查"):
+            steps = state.setdefault("switch_steps", {})
+            steps[index] = steps.get(index, 0) + 1
+        if update_log and (parsed_pct is not None or not is_heartbeat or message.startswith(">")):
             self.logger.append(f"[{path.name}] {message}")
         elif update_log and is_heartbeat:
             self.logger.append(f"[{path.name}] {message}")
@@ -499,10 +504,18 @@ class MainWindow(QMainWindow):
         if not update_progress:
             return
 
-        if index in clone_map and clone_map[index] > 0:
+        switch_steps = state.get("switch_steps", {}).get(index, 0)
+        switch_total = 6
+        if switch_steps > 0:
+            if is_heartbeat:
+                sub_fraction = min(0.99, (switch_steps + 0.4) / switch_total)
+            elif message.startswith("> 切线完成"):
+                sub_fraction = 1.0
+            else:
+                sub_fraction = min(0.95, switch_steps / switch_total)
+        elif index in clone_map and clone_map[index] > 0:
             sub_fraction = clone_map[index]
         elif is_heartbeat or "执行 clone" in message:
-            # 无 git 百分比输出时用渐近曲线，避免长期停在 95%
             sub_fraction = 1.0 - math.exp(-elapsed_repo / max(avg * 2.0, 300.0))
             sub_fraction = min(0.99, sub_fraction)
         else:
@@ -521,7 +534,9 @@ class MainWindow(QMainWindow):
         if parsed_pct is not None:
             status += f" | clone {parsed_pct}%"
         elif is_heartbeat:
-            status += " | clone 进行中"
+            status += " | 切线进行中"
+        elif message.startswith("> git"):
+            status += f" | {message.removeprefix('> ')}"
         try:
             progress.update_progress_fraction(overall_fraction, status)
         except RuntimeError:
@@ -720,12 +735,22 @@ class MainWindow(QMainWindow):
 
         action_name = f"切换分支 -> {target_branch or '当前分支'}"
         write_error_log("切线入口", f"开始稳定串行操作: {action_name}, repos={len(selected)} (避免并行Qt回调闪退/卡住)")
+
+        def switch_repo(path: Path, on_step=None, cancel_check=None) -> str:
+            def relay(message: str) -> None:
+                if on_step:
+                    on_step(message)
+
+            return self.git_manager.switch(path, target_branch, stash, callback=relay)
+
         self._run_parallel_git_operation(
             operation_name=action_name,
             repo_paths=selected,
-            per_repo_fn=lambda path: self.git_manager.switch(path, target_branch, stash),
+            per_repo_fn=switch_repo,
             write_result_to_panel=True,
             force_stable_serial=True,
+            enable_step_logs=True,
+            progress_hint="切线进行中，详情见下方运行日志。",
         )
 
     def _run_parallel_git_operation(
@@ -964,7 +989,9 @@ class MainWindow(QMainWindow):
         self.logger.start_operation(f"{operation_name} ({total} 个仓库)")
         progress = OperationProgressDialog(self, f"正在执行: {operation_name}")
         progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
         progress.update_progress(0, total, f"准备开始，目标仓库: {total}")
+        progress.open()
         self.operation_panel.btn_switch.setEnabled(False)
         hint = progress_hint or f"{operation_name}进行中，汇总结果将在完成后显示在此处；详情见下方运行日志。"
         self.operation_panel.update_result(hint, True)
@@ -1127,7 +1154,16 @@ class MainWindow(QMainWindow):
                                 return
                             if state.get("cancelled"):
                                 return
-                            is_heartbeat = "clone 进行中" in msg
+                            is_heartbeat = any(
+                                token in msg
+                                for token in (
+                                    "clone 进行中",
+                                    "fetch 进行中",
+                                    "checkout 进行中",
+                                    "reset 进行中",
+                                    "clean 进行中",
+                                )
+                            )
                             is_git_line = msg.startswith("  ")
                             if is_git_line or is_heartbeat:
                                 throttle = throttles.setdefault(i, CloneOutputThrottle())
