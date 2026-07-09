@@ -41,20 +41,17 @@ class GitManager:
         timeout: int = 45,
         *,
         runtime_config: bool = False,
-        heartbeat_callback: Optional[Callable[[int], None]] = None,
     ) -> str:
         """执行 git 命令，返回输出。自动处理常见错误。
 
         默认 timeout 45s；大仓 checkout/fetch 可通过 ``runtime_config`` 注入
         ``gc.auto=0`` 等参数，避免切线过程中 auto gc 拖慢或触发超时。
-        ``heartbeat_callback`` 供长时间命令向 UI 回传已用秒数，避免界面看似卡死。
 
         Args:
             repo_path: 仓库根目录。
             args: ``git`` 之后的子命令参数。
             timeout: 子进程超时秒数。
             runtime_config: 是否注入 clone 同款运行时 git -c 配置（大仓切线用）。
-            heartbeat_callback: 可选；阻塞等待期间按间隔回调已执行秒数。
 
         Returns:
             命令 stdout/stderr 摘要；失败或超时为可读错误字符串。
@@ -62,47 +59,30 @@ class GitManager:
         config_prefix = clone_runtime_config_args(slim=False) if runtime_config else []
         cmd = ["git", *config_prefix] + args
         write_error_log("Git命令开始", f"repo={repo_path}\ncmd={' '.join(cmd)}\ntimeout={timeout}")
-
-        def _run_subprocess() -> subprocess.CompletedProcess:
-            if heartbeat_callback is None:
-                return subprocess.run(
-                    cmd,
-                    cwd=str(repo_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    check=False,
-                    **subprocess_git_command_kwargs(),
-                )
-            proc = subprocess.Popen(
+        try:
+            result = subprocess.run(
                 cmd,
                 cwd=str(repo_path),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
+                timeout=timeout,
+                check=False,
                 **subprocess_git_command_kwargs(),
             )
-            start = time.time()
-            while True:
-                try:
-                    stdout, stderr = proc.communicate(timeout=5)
-                    return subprocess.CompletedProcess(cmd, proc.returncode if proc.returncode is not None else 0, stdout, stderr)
-                except subprocess.TimeoutExpired:
-                    elapsed = int(time.time() - start)
-                    heartbeat_callback(elapsed)
-                    if time.time() - start > timeout:
-                        proc.kill()
-                        proc.communicate()
-                        raise subprocess.TimeoutExpired(cmd, timeout)
-
-        try:
-            result = _run_subprocess()
             if result.returncode != 0:
                 write_error_log("Git命令失败", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}\nstderr={result.stderr[:400]}")
                 # 常见锁错误处理
                 if "index.lock" in result.stderr or "Another git process" in result.stderr:
                     self._unlock_git(repo_path)
-                    result = _run_subprocess()
+                    # 重试一次
+                    result = subprocess.run(
+                        cmd,
+                        cwd=str(repo_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        **subprocess_git_command_kwargs(),
+                    )
                     write_error_log("Git命令重试完成", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
             write_error_log("Git命令结束", f"repo={repo_path}\ncmd={' '.join(cmd)}\ncode={result.returncode}")
             return result.stdout.strip() or result.stderr.strip()
@@ -244,9 +224,7 @@ class GitManager:
         """切换分支 (一键切线)。
 
         每次操作前强制_unlock_git，解决“旧git进程残留导致并发冲突/闪退”问题。
-        逻辑顺序：unlock -> 按规则处理工作区 (stash / 丢弃) -> fetch(-f) ->
-        若已在目标分支且与 origin 一致则跳过；若已在目标分支则 ``reset --hard`` 快进；
-        否则 ``checkout -B --force`` 跨分支切换。
+        逻辑顺序：unlock -> 按规则处理工作区 (stash / 丢弃) -> fetch(-f) -> checkout -B --force。
 
         工作区规则（``git.switch_max_stash_files`` 可配置，默认 500）：
         - 无变动文件：跳过 stash/丢弃。
@@ -267,32 +245,25 @@ class GitManager:
         if not target_branch:
             target_branch = get_current_branch(repo_path)
 
-        def _notify(message: str) -> None:
-            if callback:
-                callback(message)
-
         # 每次切线前强制解锁，防止并行或残留进程导致index.lock冲突（用户反馈核心原因）
-        _notify("正在解锁 git 锁...")
         self._unlock_git(repo_path)
         write_error_log("切线开始", f"repo={repo_path}\ntarget_branch={target_branch}\nstash={stash}")
 
-        _notify(f"正在切换到 {target_branch} @ {repo_path.name}...")
+        if callback:
+            callback(f"正在切换到 {target_branch} @ {repo_path.name}...")
 
         outputs = []
 
         max_files = int(self.settings.get("git.switch_max_stash_files", 500))
-        _notify("正在检查工作区变动...")
         changed_files = self._count_unique_changed_paths(repo_path)
 
         if changed_files > 0:
             if changed_files > max_files:
-                _notify(f"本地变动 {changed_files} 个文件，超过上限，正在强制丢弃...")
                 outputs.append(
                     f"本地变动文件数 {changed_files} 超过上限 {max_files}，已强制丢弃本地修改（忽略 Stash 勾选）"
                 )
                 outputs.append(self._discard_local_worktree(repo_path))
             elif stash:
-                _notify(f"正在 stash 本地修改（{changed_files} 个文件）...")
                 stash_out = self._run_git(
                     repo_path,
                     ["stash", "push", "-u", "-m", "Auto-stash before switch"],
@@ -300,67 +271,32 @@ class GitManager:
                 )
                 outputs.append(f"Stash: {stash_out}")
             else:
-                _notify(f"正在丢弃本地修改（{changed_files} 个文件）...")
                 outputs.append("未勾选 Stash，已丢弃本地修改")
                 outputs.append(self._discard_local_worktree(repo_path))
 
         fetch_timeout = int(self.settings.get("git.switch_fetch_timeout", 120))
         checkout_timeout = int(self.settings.get("git.switch_checkout_timeout", 300))
-        current_branch = get_current_branch(repo_path)
-        on_target_branch = current_branch == target_branch
-        remote_ref = f"origin/{target_branch}"
 
-        _notify(f"正在 fetch origin/{target_branch}...")
-        fetch_heartbeat = (lambda elapsed: _notify(f"fetch 进行中... {elapsed}s")) if callback else None
         fetch_out = self._run_git(
             repo_path,
             ["fetch", "origin", target_branch, "--no-tags", "-f"],
             timeout=fetch_timeout,
             runtime_config=True,
-            heartbeat_callback=fetch_heartbeat,
         )
         outputs.append(f"Fetch: {fetch_out}")
 
-        checkout_heartbeat = (lambda elapsed: _notify(f"切线进行中... {elapsed}s")) if callback else None
-        head = self._run_git(repo_path, ["rev-parse", "HEAD"], timeout=30).strip()
-        remote_head = self._run_git(repo_path, ["rev-parse", remote_ref], timeout=30).strip()
-
-        if head and remote_head and head == remote_head and on_target_branch:
-            _notify("已与 origin 最新提交一致，跳过工作区更新")
-            outputs.append(f"Switch: 已在 {target_branch} 最新 ({head[:8]})")
-        elif on_target_branch:
-            _notify(f"已在 {target_branch}，正在快进到 origin 最新（同分支加速）...")
-            sync_out = self._run_git(
-                repo_path,
-                ["reset", "--hard", remote_ref],
-                timeout=checkout_timeout,
-                runtime_config=True,
-                heartbeat_callback=checkout_heartbeat,
-            )
-            outputs.append(f"Sync: {sync_out}")
-        else:
-            switch_args = ["checkout", "-B", target_branch, remote_ref, "--force"]
-            _notify(f"正在 checkout {target_branch}（跨分支，大仓可能需数分钟）...")
+        switch_args = ["checkout", "-B", target_branch, f"origin/{target_branch}", "--force"]
+        switch_out = self._run_git(
+            repo_path, switch_args, timeout=checkout_timeout, runtime_config=True,
+        )
+        if switch_out.startswith("命令超时"):
+            self._unlock_git(repo_path)
             switch_out = self._run_git(
-                repo_path,
-                switch_args,
-                timeout=checkout_timeout,
-                runtime_config=True,
-                heartbeat_callback=checkout_heartbeat,
+                repo_path, switch_args, timeout=checkout_timeout, runtime_config=True,
             )
-            if switch_out.startswith("命令超时"):
-                _notify("checkout 超时，正在解锁并重试...")
-                self._unlock_git(repo_path)
-                switch_out = self._run_git(
-                    repo_path,
-                    switch_args,
-                    timeout=checkout_timeout,
-                    runtime_config=True,
-                    heartbeat_callback=checkout_heartbeat,
-                )
-                if not switch_out.startswith("命令超时"):
-                    outputs.append("Switch: checkout 超时后已自动重试并成功")
-            outputs.append(f"Switch: {switch_out}")
+            if not switch_out.startswith("命令超时"):
+                outputs.append("Switch: checkout 超时后已自动重试并成功")
+        outputs.append(f"Switch: {switch_out}")
 
         result = "\n".join(outputs)
         write_error_log("切线结束", f"repo={repo_path}\nresult_preview={result[:400]}")

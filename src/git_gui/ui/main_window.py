@@ -490,11 +490,7 @@ class MainWindow(QMainWindow):
         if parsed_pct is not None:
             clone_map[index] = parsed_pct / 100.0
 
-        is_heartbeat = (
-            "clone 进行中" in message
-            or "切线进行中" in message
-            or "fetch 进行中" in message
-        )
+        is_heartbeat = "clone 进行中" in message
         if update_log and (parsed_pct is not None or not is_heartbeat):
             self.logger.append(f"[{path.name}] {message}")
         elif update_log and is_heartbeat:
@@ -505,8 +501,8 @@ class MainWindow(QMainWindow):
 
         if index in clone_map and clone_map[index] > 0:
             sub_fraction = clone_map[index]
-        elif is_heartbeat or "执行 clone" in message or "正在 checkout" in message:
-            # 无 git 百分比输出时用渐近曲线，避免长期停在 0%
+        elif is_heartbeat or "执行 clone" in message:
+            # 无 git 百分比输出时用渐近曲线，避免长期停在 95%
             sub_fraction = 1.0 - math.exp(-elapsed_repo / max(avg * 2.0, 300.0))
             sub_fraction = min(0.99, sub_fraction)
         else:
@@ -525,12 +521,7 @@ class MainWindow(QMainWindow):
         if parsed_pct is not None:
             status += f" | clone {parsed_pct}%"
         elif is_heartbeat:
-            if "fetch 进行中" in message:
-                status += " | fetch 进行中"
-            elif "切线进行中" in message:
-                status += " | checkout 进行中"
-            else:
-                status += " | clone 进行中"
+            status += " | clone 进行中"
         try:
             progress.update_progress_fraction(overall_fraction, status)
         except RuntimeError:
@@ -729,22 +720,12 @@ class MainWindow(QMainWindow):
 
         action_name = f"切换分支 -> {target_branch or '当前分支'}"
         write_error_log("切线入口", f"开始稳定串行操作: {action_name}, repos={len(selected)} (避免并行Qt回调闪退/卡住)")
-
-        def switch_repo(path: Path, on_step=None, cancel_check=None) -> str:
-            def relay(message: str) -> None:
-                if on_step:
-                    on_step(message)
-
-            return self.git_manager.switch(path, target_branch, stash, callback=relay)
-
         self._run_parallel_git_operation(
             operation_name=action_name,
             repo_paths=selected,
-            per_repo_fn=switch_repo,
+            per_repo_fn=lambda path: self.git_manager.switch(path, target_branch, stash),
             write_result_to_panel=True,
             force_stable_serial=True,
-            enable_step_logs=True,
-            progress_hint="切线进行中，大仓 checkout 可能需数分钟；详情见下方运行日志。",
         )
 
     def _run_parallel_git_operation(
@@ -983,9 +964,7 @@ class MainWindow(QMainWindow):
         self.logger.start_operation(f"{operation_name} ({total} 个仓库)")
         progress = OperationProgressDialog(self, f"正在执行: {operation_name}")
         progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
         progress.update_progress(0, total, f"准备开始，目标仓库: {total}")
-        progress.open()
         self.operation_panel.btn_switch.setEnabled(False)
         hint = progress_hint or f"{operation_name}进行中，汇总结果将在完成后显示在此处；详情见下方运行日志。"
         self.operation_panel.update_result(hint, True)
@@ -1148,11 +1127,7 @@ class MainWindow(QMainWindow):
                                 return
                             if state.get("cancelled"):
                                 return
-                            is_heartbeat = (
-                                "clone 进行中" in msg
-                                or "切线进行中" in msg
-                                or "fetch 进行中" in msg
-                            )
+                            is_heartbeat = "clone 进行中" in msg
                             is_git_line = msg.startswith("  ")
                             if is_git_line or is_heartbeat:
                                 throttle = throttles.setdefault(i, CloneOutputThrottle())
